@@ -33,6 +33,7 @@ type Router struct {
 }
 
 func NewRouter(config *cp.Config, rmClient rmPb.ResourceManagerClient) *Router {
+	// 取结构体地址表示实例化
 	return &Router{
 		nodeMap:     cmap.New(),
 		functionMap: cmap.New(),
@@ -41,24 +42,31 @@ func NewRouter(config *cp.Config, rmClient rmPb.ResourceManagerClient) *Router {
 	}
 }
 
+// 给结构体类型的引用添加方法，相当于添加实例方法，直接给结构体添加方法相当于静态方法
 func (r *Router) Start() {
 	// Just in case the router has internal loops.
 }
 
 func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerRequest) (*pb.AcquireContainerReply, error) {
+	// 临时变量，判断是否有空闲的container
 	var res *ContainerInfo
 
 	// Save the name for later ReturnContainer
 	r.requestMap.Set(req.RequestId, req.FunctionName)
 
+	// 取函数对应的容器信息
 	r.functionMap.SetIfAbsent(req.FunctionName, cmap.New())
 	fmObj, _ := r.functionMap.Get(req.FunctionName)
+	// .是类型转换
+	// containerMap存的是执行对应函数的容器
 	containerMap := fmObj.(cmap.ConcurrentMap)
 
+	// 遍历查看是否有空闲容器
 	for _, key := range containerMap.Keys() {
 		cmObj, _ := containerMap.Get(key)
 		container := cmObj.(*ContainerInfo)
 		container.Lock()
+		// 首先有ContainerInfo表示当前有对应函数的容器，其次请求数小于1表示之前还没有用它来执行过相应函数，即表示是个空闲的容器。
 		if len(container.requests) < 1 {
 			container.requests[req.RequestId] = 1
 			res = container
@@ -69,11 +77,13 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	}
 
 	if res == nil { // if no idle container exists
+		// 获取一个node，有满足内存要求的node直接返回该node，否则申请一个新的node返回
 		node, err := r.getNode(req.AccountId, req.FunctionConfig.MemoryInBytes)
 		if err != nil {
 			return nil, err
 		}
 
+		// 在node上创建运行该函数的容器，并保存容器信息
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		replyC, err := node.CreateContainer(ctx, &nsPb.CreateContainerRequest{
@@ -121,6 +131,7 @@ func (r *Router) getNode(accountId string, memoryReq int64) (*NodeInfo, error) {
 		}
 		node.Unlock()
 	}
+	// 30s之内没有请求到节点就取消
 	ctxR, cancelR := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelR()
 	replyRn, err := r.rmClient.ReserveNode(ctxR, &rmPb.ReserveNodeRequest{
