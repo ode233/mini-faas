@@ -19,7 +19,9 @@
     <select />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="0e0ae9fb-1931-4991-b082-5abb15cba0f6" name="Default Changelist" comment="update" />
+    <list default="true" id="0e0ae9fb-1931-4991-b082-5abb15cba0f6" name="Default Changelist" comment="update">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -109,10 +111,10 @@
       <screen x="0" y="0" width="1920" height="1040" />
     </state>
     <state x="752" y="450" key="#GOROOT/0.0.1920.1040/1920.0.1920.1040@0.0.1920.1040" timestamp="1594744514569" />
-    <state x="414" y="175" key="#com.intellij.execution.impl.EditConfigurationsDialog" timestamp="1594745258842">
+    <state x="414" y="175" key="#com.intellij.execution.impl.EditConfigurationsDialog" timestamp="1595229830405">
       <screen x="0" y="0" width="1920" height="1040" />
     </state>
-    <state x="414" y="175" key="#com.intellij.execution.impl.EditConfigurationsDialog/0.0.1920.1040/1920.0.1920.1040@0.0.1920.1040" timestamp="1594745258842" />
+    <state x="414" y="175" key="#com.intellij.execution.impl.EditConfigurationsDialog/0.0.1920.1040/1920.0.1920.1040@0.0.1920.1040" timestamp="1595229830405" />
     <state x="684" y="320" key="#com.intellij.fileTypes.FileTypeChooser" timestamp="1595172689452">
       <screen x="0" y="0" width="1920" height="1040" />
     </state>
@@ -125,6 +127,38 @@
       <screen x="0" y="0" width="1920" height="1040" />
     </state>
     <state x="740" y="275" key="FileChooserDialogImpl/0.0.1920.1040/1920.0.1920.1040@0.0.1920.1040" timestamp="1595142451539" />
+    <state width="1877" height="348" key="GridCell.Tab.0.bottom" timestamp="1595229869146">
+      <screen x="0" y="0" width="1920" height="1040" />
+    </state>
+    <state width="1877" height="348" key="GridCell.Tab.0.bottom/0.0.1920.1040/1920.0.1920.1040@0.0.1920.1040" timestamp="1595229869146" />
+    <state width="1877" height="348" key="GridCell.Tab.0.center" timestamp="1595229869146">
+      <screen x="0" y="0" width="1920" height="1040" />
+    </state>
+    <state width="1877" height="348" key="GridCell.Tab.0.center/0.0.1920.1040/1920.0.1920.1040@0.0.1920.1040" timestamp="1595229869146" />
+    <state width="1877" height="348" key="GridCell.Tab.0.left" timestamp="1595229869145">
+      <screen x="0" y="0" width="1920" height="1040" />
+    </state>
+    <state width="1877" height="348" key="GridCell.Tab.0.left/0.0.1920.1040/1920.0.1920.1040@0.0.1920.1040" timestamp="1595229869145" />
+    <state width="1877" height="348" key="GridCell.Tab.0.right" timestamp="1595229869146">
+      <screen x="0" y="0" width="1920" height="1040" />
+    </state>
+    <state width="1877" height="348" key="GridCell.Tab.0.right/0.0.1920.1040/1920.0.1920.1040@0.0.1920.1040" timestamp="1595229869146" />
+    <state width="1877" height="348" key="GridCell.Tab.1.bottom" timestamp="1595229869146">
+      <screen x="0" y="0" width="1920" height="1040" />
+    </state>
+    <state width="1877" height="348" key="GridCell.Tab.1.bottom/0.0.1920.1040/1920.0.1920.1040@0.0.1920.1040" timestamp="1595229869146" />
+    <state width="1877" height="348" key="GridCell.Tab.1.center" timestamp="1595229869146">
+      <screen x="0" y="0" width="1920" height="1040" />
+    </state>
+    <state width="1877" height="348" key="GridCell.Tab.1.center/0.0.1920.1040/1920.0.1920.1040@0.0.1920.1040" timestamp="1595229869146" />
+    <state width="1877" height="348" key="GridCell.Tab.1.left" timestamp="1595229869146">
+      <screen x="0" y="0" width="1920" height="1040" />
+    </state>
+    <state width="1877" height="348" key="GridCell.Tab.1.left/0.0.1920.1040/1920.0.1920.1040@0.0.1920.1040" timestamp="1595229869146" />
+    <state width="1877" height="348" key="GridCell.Tab.1.right" timestamp="1595229869146">
+      <screen x="0" y="0" width="1920" height="1040" />
+    </state>
+    <state width="1877" height="348" key="GridCell.Tab.1.right/0.0.1920.1040/1920.0.1920.1040@0.0.1920.1040" timestamp="1595229869146" />
     <state x="461" y="164" key="SettingsEditor" timestamp="1595143693996">
       <screen x="0" y="0" width="1920" height="1040" />
     </state>
@@ -146,5 +180,12 @@
       <screen x="0" y="0" width="1920" height="1040" />
     </state>
     <state x="693" y="414" key="git4idea.ui.GitResetDialog/0.0.1920.1040/1920.0.1920.1040@0.0.1920.1040" timestamp="1595069598587" />
+  </component>
+  <component name="XDebuggerManager">
+    <breakpoint-manager>
+      <default-breakpoints>
+        <breakpoint type="DlvErrorBreakpoint" />
+      </default-breakpoints>
+    </breakpoint-manager>
   </component>
 </project>
