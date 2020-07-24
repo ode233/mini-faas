@@ -11,7 +11,7 @@ start-resourcemanager() {
   docker pull "$IMAGE_NAMESPACE/nodeservice:$IMAGE_TAG"
   docker pull "$IMAGE_NAMESPACE/containerserviceext:$IMAGE_TAG"
   docker run -d --name aliyuncnpc-resourcemanager \
-    -v /var/run/docker.sock:/var/run/docker.sock \
+    -v //var/run/docker.sock:/var/run/docker.sock \
     -v ${LOCAL_LOG_DIR}/resourcemanager/log:/aliyuncnpc/resourcemanager/log \
     -e NODE_SERVICE_ROOT_DIR=$NODE_SERVICE_ROOT_DIR \
     "$IMAGE_NAMESPACE/resourcemanager:$IMAGE_TAG"

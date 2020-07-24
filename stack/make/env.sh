@@ -4,7 +4,8 @@ fi
 
 if [ -z "$LOCAL_LOG_DIR" ]
 then
-    export LOCAL_LOG_DIR=$HOME/aliyuncnpc
+#    export LOCAL_LOG_DIR=$HOME/aliyuncnpc
+    export LOCAL_LOG_DIR=/$HOME/aliyuncnpc
 fi
 
 if [ -z "$IMAGE_NAMESPACE" ]
@@ -14,7 +15,8 @@ fi
 
 if [ -z "$NODE_SERVICE_ROOT_DIR" ]
 then
-    export NODE_SERVICE_ROOT_DIR=$HOME
+#    export NODE_SERVICE_ROOT_DIR=$HOME
+    export NODE_SERVICE_ROOT_DIR=/$HOME
     echo NODE_SERVICE_ROOT_DIR $NODE_SERVICE_ROOT_DIR
 fi
 
