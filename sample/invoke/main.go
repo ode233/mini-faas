@@ -2,7 +2,6 @@ package main
 
 import (
 	pb "aliyun/serverless/mini-faas/apiserver/proto"
-
 	"google.golang.org/grpc"
 
 	"context"
@@ -16,12 +15,12 @@ type input struct {
 	param        string
 }
 
-var sampleEvents = map[string]string {
-	"dev_function_1":"1.2",
-	"dev_function_2":"",
-	"dev_function_3":"",
-	"dev_function_4":"50",
-	"dev_function_5":"",
+var sampleEvents = map[string]string{
+	"dev_function_1": "1.2",
+	"dev_function_2": "",
+	"dev_function_3": "",
+	"dev_function_4": "50",
+	"dev_function_5": "",
 }
 
 func main() {
@@ -34,7 +33,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	asClient:= pb.NewAPIServerClient(conn)
+	asClient := pb.NewAPIServerClient(conn)
 
 	lfReply, err := asClient.ListFunctions(context.Background(), &pb.ListFunctionsRequest{})
 	if err != nil {

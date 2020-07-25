@@ -3,6 +3,7 @@ package core
 import (
 	"aliyun/serverless/mini-faas/scheduler/utils/logger"
 	"context"
+	"encoding/json"
 	"sort"
 	"sync"
 	"time"
@@ -28,7 +29,7 @@ type ContainerInfo struct {
 }
 
 type Router struct {
-	nodeMap     cmap.ConcurrentMap // instance_id -> NodeInfo
+	nodeMap     cmap.ConcurrentMap // instance_id -> NodeInfo instance_id == nodeDesc.Id == nodeId
 	functionMap cmap.ConcurrentMap // function_name -> ContainerMap (container_id -> ContainerInfo)
 	requestMap  cmap.ConcurrentMap // request_id -> FunctionName
 	rmClient    rmPb.ResourceManagerClient
@@ -112,6 +113,15 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		containerMap.Set(res.id, res)
 	}
 
+	// 打印节点信息
+	nmObj, _ := r.nodeMap.Get(res.nodeId)
+	node := nmObj.(*NodeInfo)
+	nodeGS, _ := node.GetStats(ctx, &nsPb.GetStatsRequest{
+		RequestId: req.RequestId,
+	})
+	data, _ := json.MarshalIndent(nodeGS, "", "    ")
+	logger.Infof("node %s status:\n%s\n", res.nodeId, data)
+
 	return &pb.AcquireContainerReply{
 		NodeId:          res.nodeId,
 		NodeAddress:     res.address,
@@ -142,14 +152,14 @@ func (r *Router) getNode(accountId string, memoryReq int64) (*NodeInfo, error) {
 	if err != nil {
 		logger.WithFields(logger.Fields{
 			"Operation": "ReserveNode",
-			"Latency": (time.Now().UnixNano() - now)/1e6,
-			"Error": true,
+			"Latency":   (time.Now().UnixNano() - now) / 1e6,
+			"Error":     true,
 		}).Errorf("Failed to reserve node due to %v", err)
 		return nil, errors.WithStack(err)
 	}
 	logger.WithFields(logger.Fields{
 		"Operation": "ReserveNode",
-		"Latency": (time.Now().UnixNano() - now)/1e6,
+		"Latency":   (time.Now().UnixNano() - now) / 1e6,
 	}).Infof("")
 
 	nodeDesc := replyRn.Node

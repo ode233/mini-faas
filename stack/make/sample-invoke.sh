@@ -5,7 +5,7 @@ source ./stack/make/env.sh
 image=$IMAGE_NAMESPACE/sample-invoke:$IMAGE_TAG
 
 if [ "$BUILD" == "true" ]; then
-  docker run -v $(pwd):/mini-faas golang:1.12.9 bash -c "cd /mini-faas/sample/invoke; export GOPROXY=https://goproxy.io; go build -o sample-invoke ./main.go"
+  docker run -v /$(pwd):/mini-faas golang:1.12.9 bash -c "cd /mini-faas/sample/invoke; export GOPROXY=https://goproxy.io; go build -o sample-invoke ./main.go"
   cd sample/invoke
   chmod +x sample-invoke
   docker build -t $image .

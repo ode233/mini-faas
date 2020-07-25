@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
@@ -16,8 +17,8 @@ import (
 	"aliyun/serverless/mini-faas/scheduler/core"
 	pb "aliyun/serverless/mini-faas/scheduler/proto"
 	"aliyun/serverless/mini-faas/scheduler/server"
-	"aliyun/serverless/mini-faas/scheduler/utils/global"
 	"aliyun/serverless/mini-faas/scheduler/utils/env"
+	"aliyun/serverless/mini-faas/scheduler/utils/global"
 	"aliyun/serverless/mini-faas/scheduler/utils/logger"
 )
 
@@ -113,5 +114,7 @@ func main() {
 		logger.Infof("Scheduler gRPC server gracefully stopping ...")
 		svr.GracefulStop()
 		logger.Infof("Scheduler gRPC server gracefully stopped.")
+		data, _ := json.MarshalIndent(server.RequestStatusMap, "", "    ")
+		logger.Infof("result:\n%s\n", data)
 	}
 }
