@@ -62,13 +62,6 @@ func (s *Server) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		ScheduleAcquireContainerLatency: latency,
 		RequireMemory:                   int64(float64(req.FunctionConfig.MemoryInBytes) / (math.Pow(float64(1024), float64(2)))),
 	}
-	logger.WithFields(logger.Fields{
-		"Operation":     "AcquireContainer",
-		"FunctionName":  req.FunctionName,
-		"RequestId":     req.RequestId,
-		"Latency":       latency,
-		"MemoryInBytes": req.FunctionConfig.MemoryInBytes,
-	}).Infof("")
 	if err != nil {
 		logger.WithFields(logger.Fields{
 			"Operation": "AcquireContainer",
@@ -96,15 +89,6 @@ func (s *Server) ReturnContainer(ctx context.Context, req *pb.ReturnContainerReq
 	requestStatus.ResponseTime = requestStatus.ScheduleAcquireContainerLatency +
 		requestStatus.ScheduleReturnContainerLatency + requestStatus.FunctionExecutionDuration
 	requestStatus.MaxMemoryUsage = int64(float64(req.MaxMemoryUsageInBytes) / (math.Pow(float64(1024), float64(2))))
-	logger.WithFields(logger.Fields{
-		"Operation":             "ReturnContainer",
-		"ContainerId":           req.ContainerId,
-		"RequestId":             req.RequestId,
-		"ErrorCode":             req.ErrorCode,
-		"MaxMemoryUsageInBytes": req.MaxMemoryUsageInBytes,
-		"Latency":               latency,
-		"DurationInMs":          req.DurationInNanos / 1e6,
-	}).Infof("")
 	if err != nil {
 		logger.WithFields(logger.Fields{
 			"Operation": "ReturnContainer",
