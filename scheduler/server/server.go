@@ -3,6 +3,7 @@ package server
 import (
 	"aliyun/serverless/mini-faas/scheduler/utils/logger"
 	"encoding/json"
+	cmap "github.com/orcaman/concurrent-map"
 	"math"
 	"sync"
 	"time"
@@ -30,7 +31,7 @@ type RequestStatus struct {
 	MaxMemoryUsage int64
 }
 
-var RequestStatusMap = make(map[string]*RequestStatus) // request_id -> RequestStatus
+var RequestStatusMap = cmap.New() // request_id -> RequestStatus
 
 type Server struct {
 	sync.WaitGroup
@@ -66,13 +67,13 @@ func (s *Server) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		}).Errorf("Failed to acquire due to %v", err)
 		return nil, err
 	}
-	RequestStatusMap[req.RequestId] = &RequestStatus{
+	RequestStatusMap.Set(req.RequestId, &RequestStatus{
 		FunctionName:                    req.FunctionName,
 		NodeAddress:                     reply.NodeAddress,
 		ContainerId:                     reply.ContainerId,
 		ScheduleAcquireContainerLatency: latency,
 		RequireMemory:                   int64(float64(req.FunctionConfig.MemoryInBytes) / (math.Pow(float64(1024), float64(2)))),
-	}
+	})
 	return reply, nil
 }
 
@@ -95,7 +96,8 @@ func (s *Server) ReturnContainer(ctx context.Context, req *pb.ReturnContainerReq
 	}
 
 	// 本次调用相关信息
-	requestStatus := RequestStatusMap[req.RequestId]
+	requestStatusObj, _ := RequestStatusMap.Get(req.RequestId)
+	requestStatus := requestStatusObj.(*RequestStatus)
 	requestStatus.ScheduleReturnContainerLatency = latency
 	requestStatus.FunctionExecutionDuration = req.DurationInNanos / 1e6
 	requestStatus.ResponseTime = requestStatus.ScheduleAcquireContainerLatency +
@@ -103,7 +105,7 @@ func (s *Server) ReturnContainer(ctx context.Context, req *pb.ReturnContainerReq
 	requestStatus.MaxMemoryUsage = int64(float64(req.MaxMemoryUsageInBytes) / (math.Pow(float64(1024), float64(2))))
 	data, _ := json.MarshalIndent(requestStatus, "", "    ")
 	logger.Infof("\nrequest id: %s\n%s\n", req.RequestId, data)
-	delete(RequestStatusMap, req.RequestId)
+	RequestStatusMap.Remove(req.RequestId)
 
 	return &pb.ReturnContainerReply{}, nil
 }

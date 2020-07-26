@@ -114,13 +114,13 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	}
 
 	// 打印节点信息
-	//nmObj, _ := r.nodeMap.Get(res.nodeId)
-	//node := nmObj.(*NodeInfo)
-	//nodeGS, _ := node.GetStats(ctx, &nsPb.GetStatsRequest{
-	//	RequestId: req.RequestId,
-	//})
-	//data, _ := json.MarshalIndent(nodeGS,"","    ")
-	//logger.Infof("node %s status:\n%s\n", res.nodeId, data)
+	nmObj, _ := r.nodeMap.Get(res.nodeId)
+	node := nmObj.(*NodeInfo)
+	nodeGS, _ := node.GetStats(ctx, &nsPb.GetStatsRequest{
+		RequestId: req.RequestId,
+	})
+	data, _ := json.MarshalIndent(nodeGS, "", "    ")
+	logger.Infof("node %s status:\n%s\n", res.nodeId, data)
 
 	return &pb.AcquireContainerReply{
 		NodeId:          res.nodeId,
