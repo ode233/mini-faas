@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
@@ -114,7 +113,5 @@ func main() {
 		logger.Infof("Scheduler gRPC server gracefully stopping ...")
 		svr.GracefulStop()
 		logger.Infof("Scheduler gRPC server gracefully stopped.")
-		data, _ := json.MarshalIndent(server.RequestStatusMap, "", "    ")
-		logger.Infof("result:\n%s\n", data)
 	}
 }

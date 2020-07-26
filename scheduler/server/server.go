@@ -18,6 +18,7 @@ import (
 
 type RequestStatus struct {
 	FunctionName string
+	NodeAddress  string
 	ContainerId  string
 	// ms
 	ScheduleAcquireContainerLatency int64
@@ -57,11 +58,6 @@ func (s *Server) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	now := time.Now().UnixNano()
 	reply, err := s.router.AcquireContainer(ctx, req)
 	latency := (time.Now().UnixNano() - now) / 1e6
-	RequestStatusMap[req.RequestId] = &RequestStatus{
-		FunctionName:                    req.FunctionName,
-		ScheduleAcquireContainerLatency: latency,
-		RequireMemory:                   int64(float64(req.FunctionConfig.MemoryInBytes) / (math.Pow(float64(1024), float64(2)))),
-	}
 	if err != nil {
 		logger.WithFields(logger.Fields{
 			"Operation": "AcquireContainer",
@@ -69,6 +65,13 @@ func (s *Server) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 			"Error":     true,
 		}).Errorf("Failed to acquire due to %v", err)
 		return nil, err
+	}
+	RequestStatusMap[req.RequestId] = &RequestStatus{
+		FunctionName:                    req.FunctionName,
+		NodeAddress:                     reply.NodeAddress,
+		ContainerId:                     reply.ContainerId,
+		ScheduleAcquireContainerLatency: latency,
+		RequireMemory:                   int64(float64(req.FunctionConfig.MemoryInBytes) / (math.Pow(float64(1024), float64(2)))),
 	}
 	return reply, nil
 }
@@ -80,15 +83,8 @@ func (s *Server) ReturnContainer(ctx context.Context, req *pb.ReturnContainerReq
 		ContainerId: req.ContainerId,
 	})
 
-	// 本次调用相关信息
 	latency := (time.Now().UnixNano() - now) / 1e6
-	requestStatus := RequestStatusMap[req.RequestId]
-	requestStatus.ContainerId = req.ContainerId
-	requestStatus.ScheduleReturnContainerLatency = latency
-	requestStatus.FunctionExecutionDuration = req.DurationInNanos / 1e6
-	requestStatus.ResponseTime = requestStatus.ScheduleAcquireContainerLatency +
-		requestStatus.ScheduleReturnContainerLatency + requestStatus.FunctionExecutionDuration
-	requestStatus.MaxMemoryUsage = int64(float64(req.MaxMemoryUsageInBytes) / (math.Pow(float64(1024), float64(2))))
+
 	if err != nil {
 		logger.WithFields(logger.Fields{
 			"Operation": "ReturnContainer",
@@ -97,8 +93,17 @@ func (s *Server) ReturnContainer(ctx context.Context, req *pb.ReturnContainerReq
 		}).Errorf("Failed to acquire due to %v", err)
 		return nil, err
 	}
+
+	// 本次调用相关信息
+	requestStatus := RequestStatusMap[req.RequestId]
+	requestStatus.ScheduleReturnContainerLatency = latency
+	requestStatus.FunctionExecutionDuration = req.DurationInNanos / 1e6
+	requestStatus.ResponseTime = requestStatus.ScheduleAcquireContainerLatency +
+		requestStatus.ScheduleReturnContainerLatency + requestStatus.FunctionExecutionDuration
+	requestStatus.MaxMemoryUsage = int64(float64(req.MaxMemoryUsageInBytes) / (math.Pow(float64(1024), float64(2))))
 	data, _ := json.MarshalIndent(requestStatus, "", "    ")
 	logger.Infof("\nrequest id: %s\n%s\n", req.RequestId, data)
+	delete(RequestStatusMap, req.RequestId)
 
 	return &pb.ReturnContainerReply{}, nil
 }

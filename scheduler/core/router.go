@@ -114,13 +114,13 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	}
 
 	// 打印节点信息
-	nmObj, _ := r.nodeMap.Get(res.nodeId)
-	node := nmObj.(*NodeInfo)
-	nodeGS, _ := node.GetStats(ctx, &nsPb.GetStatsRequest{
-		RequestId: req.RequestId,
-	})
-	data, _ := json.MarshalIndent(nodeGS, "", "    ")
-	logger.Infof("node %s status:\n%s\n", res.nodeId, data)
+	//nmObj, _ := r.nodeMap.Get(res.nodeId)
+	//node := nmObj.(*NodeInfo)
+	//nodeGS, _ := node.GetStats(ctx, &nsPb.GetStatsRequest{
+	//	RequestId: req.RequestId,
+	//})
+	//data, _ := json.MarshalIndent(nodeGS,"","    ")
+	//logger.Infof("node %s status:\n%s\n", res.nodeId, data)
 
 	return &pb.AcquireContainerReply{
 		NodeId:          res.nodeId,
@@ -142,6 +142,17 @@ func (r *Router) getNode(accountId string, memoryReq int64) (*NodeInfo, error) {
 		}
 		node.Unlock()
 	}
+
+	// 需要申请新节点时，打印其他所有节点信息
+	logger.Infof("now other node info:\n")
+	for _, key := range sortedKeys(r.nodeMap.Keys()) {
+		nmObj, _ := r.nodeMap.Get(key)
+		node := nmObj.(*NodeInfo)
+		nodeGS, _ := node.GetStats(context.Background(), &nsPb.GetStatsRequest{})
+		data, _ := json.MarshalIndent(nodeGS, "", "    ")
+		logger.Infof("node %s status:\n%s\n", node.address, data)
+	}
+
 	// 30s之内没有请求到节点就取消
 	ctxR, cancelR := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelR()
@@ -158,8 +169,9 @@ func (r *Router) getNode(accountId string, memoryReq int64) (*NodeInfo, error) {
 		return nil, errors.WithStack(err)
 	}
 	logger.WithFields(logger.Fields{
-		"Operation": "ReserveNode",
-		"Latency":   (time.Now().UnixNano() - now) / 1e6,
+		"NodeAddress": replyRn.Node.Address,
+		"Operation":   "ReserveNode",
+		"Latency":     (time.Now().UnixNano() - now) / 1e6,
 	}).Infof("")
 
 	nodeDesc := replyRn.Node
