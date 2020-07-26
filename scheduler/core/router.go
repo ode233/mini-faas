@@ -120,7 +120,7 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		RequestId: req.RequestId,
 	})
 	data, _ := json.MarshalIndent(nodeGS, "", "    ")
-	logger.Infof("node %s status:\n%s\n", res.nodeId, data)
+	logger.Infof("node %s status:\n%s\n", res.address, data)
 
 	return &pb.AcquireContainerReply{
 		NodeId:          res.nodeId,
