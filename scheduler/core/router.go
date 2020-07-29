@@ -19,6 +19,27 @@ import (
 	pb "aliyun/serverless/mini-faas/scheduler/proto"
 )
 
+type RequestStatus struct {
+	FunctionName string
+	NodeAddress  string
+	ContainerId  string
+	// ms
+	ScheduleAcquireContainerLatency int64
+	ScheduleReturnContainerLatency  int64
+	FunctionExecutionDuration       int64
+	ResponseTime                    int64
+	// bytes
+	RequireMemory       int64
+	MaxMemoryUsage      int64
+	ActualRequireMemory int64
+}
+
+type FunctionStatus struct {
+	successRequestNum  int64
+	meanMaxMemoryUsage int64
+	containerMap       cmap.ConcurrentMap
+}
+
 type ContainerInfo struct {
 	sync.Mutex
 	id       string
@@ -31,7 +52,7 @@ type ContainerInfo struct {
 type Router struct {
 	nodeMap     cmap.ConcurrentMap // instance_id -> NodeInfo instance_id == nodeDesc.Id == nodeId
 	functionMap cmap.ConcurrentMap // function_name -> ContainerMap (container_id -> ContainerInfo)
-	requestMap  cmap.ConcurrentMap // request_id -> FunctionName
+	RequestMap  cmap.ConcurrentMap // request_id -> RequestStatus
 	rmClient    rmPb.ResourceManagerClient
 }
 
@@ -40,7 +61,7 @@ func NewRouter(config *cp.Config, rmClient rmPb.ResourceManagerClient) *Router {
 	return &Router{
 		nodeMap:     cmap.New(),
 		functionMap: cmap.New(),
-		requestMap:  cmap.New(),
+		RequestMap:  cmap.New(),
 		rmClient:    rmClient,
 	}
 }
@@ -54,25 +75,29 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	// 临时变量，判断是否有空闲的container
 	var res *ContainerInfo
 
-	// Save the name for later ReturnContainer
-	r.requestMap.Set(req.RequestId, req.FunctionName)
-
 	// 取函数对应的容器信息
-	r.functionMap.SetIfAbsent(req.FunctionName, cmap.New())
+	r.functionMap.SetIfAbsent(req.FunctionName, &FunctionStatus{
+		successRequestNum:  0,
+		meanMaxMemoryUsage: 0,
+		containerMap:       cmap.New(),
+	})
 	fmObj, _ := r.functionMap.Get(req.FunctionName)
 	// .是类型转换
 	// containerMap存的是执行对应函数的容器
-	containerMap := fmObj.(cmap.ConcurrentMap)
-	// 遍历查看是否有空闲容器
+	functionStatus := fmObj.(*FunctionStatus)
+	containerMap := functionStatus.containerMap
+	// 遍历查看是否有所在节点资源满足的容器
 	for _, key := range sortedKeys(containerMap.Keys()) {
 		cmObj, _ := containerMap.Get(key)
 		container := cmObj.(*ContainerInfo)
 		container.Lock()
-		// 首先有ContainerInfo表示当前有对应函数的容器，其次请求数小于1表示之前还没有用它来执行过相应函数，即表示是个空闲的容器。
-		if len(container.requests) < 1 {
+		nodeInfoObj, _ := r.nodeMap.Get(container.nodeId)
+		nodeInfo := nodeInfoObj.(*NodeInfo)
+		if req.FunctionConfig.MemoryInBytes < nodeInfo.availableMemInBytes {
 			container.requests[req.RequestId] = 1
 			res = container
 			container.Unlock()
+			// 是否还需要选一个最优节点，还是只要内存够就行
 			break
 		}
 		container.Unlock()
@@ -113,14 +138,37 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		containerMap.Set(res.id, res)
 	}
 
-	// 打印节点信息
+	// 根据平均最大使用内存或要求内存来减少当前节点的内存使用值
+	actualRequireMemory := req.FunctionConfig.MemoryInBytes
 	nmObj, _ := r.nodeMap.Get(res.nodeId)
 	node := nmObj.(*NodeInfo)
+	node.Lock()
+	if functionStatus.meanMaxMemoryUsage != 0 {
+		node.availableMemInBytes -= functionStatus.meanMaxMemoryUsage
+		actualRequireMemory = functionStatus.meanMaxMemoryUsage
+	} else {
+		node.availableMemInBytes -= req.FunctionConfig.MemoryInBytes
+	}
+	node.Unlock()
+
+	// 打印节点信息
+	now := time.Now().UnixNano()
 	nodeGS, _ := node.GetStats(ctx, &nsPb.GetStatsRequest{
 		RequestId: req.RequestId,
 	})
+	latency := (time.Now().UnixNano() - now) / 1e6
 	data, _ := json.MarshalIndent(nodeGS, "", "    ")
-	logger.Infof("node %s status:\n%s\n", res.address, data)
+	logger.Infof("node %s status:\nlatency:%d\n%s\n", res.address, latency, data)
+
+	requestStatus := &RequestStatus{
+		FunctionName:        req.FunctionName,
+		NodeAddress:         res.address,
+		ContainerId:         res.id,
+		RequireMemory:       req.FunctionConfig.MemoryInBytes,
+		ActualRequireMemory: actualRequireMemory,
+	}
+
+	r.RequestMap.Set(req.RequestId, requestStatus)
 
 	return &pb.AcquireContainerReply{
 		NodeId:          res.nodeId,
@@ -134,13 +182,9 @@ func (r *Router) getNode(accountId string, memoryReq int64) (*NodeInfo, error) {
 	for _, key := range sortedKeys(r.nodeMap.Keys()) {
 		nmObj, _ := r.nodeMap.Get(key)
 		node := nmObj.(*NodeInfo)
-		node.Lock()
 		if node.availableMemInBytes > memoryReq {
-			node.availableMemInBytes -= memoryReq
-			node.Unlock()
 			return node, nil
 		}
-		node.Unlock()
 	}
 
 	// 需要申请新节点时，打印其他所有节点信息
@@ -153,7 +197,8 @@ func (r *Router) getNode(accountId string, memoryReq int64) (*NodeInfo, error) {
 		logger.Infof("node %s status:\n%s\n", node.address, data)
 	}
 
-	if len(r.nodeMap) >= cp.MaxNodeNum {
+	// 达到最大限制直接返回
+	if r.nodeMap.Count() >= cp.MaxNodeNum {
 		return nil, errors.New("node maximum limit reached")
 	}
 
@@ -195,16 +240,20 @@ func (r *Router) handleContainerErr(node *NodeInfo, functionMem int64) {
 }
 
 func (r *Router) ReturnContainer(ctx context.Context, res *model.ResponseInfo) error {
-	rmObj, ok := r.requestMap.Get(res.ID)
+	rmObj, ok := r.RequestMap.Get(res.ID)
 	if !ok {
 		return errors.Errorf("no request found with id %s", res.ID)
 	}
-	fmObj, ok := r.functionMap.Get(rmObj.(string))
+	requestStatus := rmObj.(*RequestStatus)
+	requestStatus.FunctionExecutionDuration = res.DurationInNanos
+	requestStatus.MaxMemoryUsage = res.MaxMemoryUsageInBytes
+
+	fmObj, ok := r.functionMap.Get(requestStatus.FunctionName)
 	if !ok {
 		return errors.Errorf("no container acquired for the request %s", res.ID)
 	}
-	containerMap := fmObj.(cmap.ConcurrentMap)
-	cmObj, ok := containerMap.Get(res.ContainerId)
+	functionStatus := fmObj.(*FunctionStatus)
+	cmObj, ok := functionStatus.containerMap.Get(res.ContainerId)
 	if !ok {
 		return errors.Errorf("no container found with id %s", res.ContainerId)
 	}
@@ -212,7 +261,23 @@ func (r *Router) ReturnContainer(ctx context.Context, res *model.ResponseInfo) e
 	container.Lock()
 	delete(container.requests, res.ID)
 	container.Unlock()
-	r.requestMap.Remove(res.ID)
+
+	// 计算meanMaxMemoryUsage
+	if functionStatus.meanMaxMemoryUsage == 0 {
+		functionStatus.meanMaxMemoryUsage = requestStatus.MaxMemoryUsage
+	} else {
+		functionStatus.meanMaxMemoryUsage =
+			(functionStatus.meanMaxMemoryUsage + requestStatus.MaxMemoryUsage/functionStatus.successRequestNum) /
+				(1 + 1/functionStatus.successRequestNum)
+	}
+	functionStatus.successRequestNum += 1
+
+	nodeInfoObj, _ := r.nodeMap.Get(container.nodeId)
+	nodeInfo := nodeInfoObj.(*NodeInfo)
+	nodeInfo.Lock()
+	nodeInfo.availableMemInBytes += requestStatus.ActualRequireMemory
+	nodeInfo.Unlock()
+
 	return nil
 }
 

@@ -8,7 +8,8 @@ type RequestInfo struct {
 }
 
 type ResponseInfo struct {
-	ID           string
-	FunctionName string
-	ContainerId  string
+	ID                    string
+	ContainerId           string
+	MaxMemoryUsageInBytes int64
+	DurationInNanos       int64
 }

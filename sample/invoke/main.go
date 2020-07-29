@@ -2,6 +2,7 @@ package main
 
 import (
 	pb "aliyun/serverless/mini-faas/apiserver/proto"
+
 	"google.golang.org/grpc"
 
 	"context"
@@ -45,10 +46,12 @@ func main() {
 		return
 	}
 
-	for _, f := range lfReply.Functions {
-		e := sampleEvents[f.FunctionName]
-		event := fmt.Sprintf(`{"functionName": "%s", "param": "%s"}`, f.FunctionName, e)
-		invokeFunction(asClient, f.FunctionName, []byte(event))
+	for i := 0; i < 100; i++ {
+		for _, f := range lfReply.Functions {
+			e := sampleEvents[f.FunctionName]
+			event := fmt.Sprintf(`{"functionName": "%s", "param": "%s"}`, f.FunctionName, e)
+			invokeFunction(asClient, f.FunctionName, []byte(event))
+		}
 	}
 }
 
