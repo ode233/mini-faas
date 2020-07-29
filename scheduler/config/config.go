@@ -2,6 +2,7 @@ package config
 
 const (
 	DefaultPort = 10450
+	MaxNodeNum  = 20
 )
 
 var Global = &Config{}

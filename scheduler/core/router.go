@@ -153,6 +153,10 @@ func (r *Router) getNode(accountId string, memoryReq int64) (*NodeInfo, error) {
 		logger.Infof("node %s status:\n%s\n", node.address, data)
 	}
 
+	if len(r.nodeMap) >= cp.MaxNodeNum {
+		return nil, errors.New("node maximum limit reached")
+	}
+
 	// 30s之内没有请求到节点就取消
 	ctxR, cancelR := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelR()
