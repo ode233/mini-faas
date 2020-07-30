@@ -19,6 +19,9 @@ import (
 	pb "aliyun/serverless/mini-faas/scheduler/proto"
 )
 
+var mutex sync.Mutex
+var NowLogInterval = 0
+
 type RequestStatus struct {
 	FunctionName string
 	NodeAddress  string
@@ -32,9 +35,13 @@ type RequestStatus struct {
 	RequireMemory       int64
 	MaxMemoryUsage      int64
 	ActualRequireMemory int64
+
+	// other info
+	IsAttainLogInterval bool
 }
 
 type FunctionStatus struct {
+	sync.Mutex
 	successRequestNum  int64
 	meanMaxMemoryUsage int64
 	containerMap       cmap.ConcurrentMap
@@ -74,6 +81,18 @@ func (r *Router) Start() {
 func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerRequest) (*pb.AcquireContainerReply, error) {
 	// 临时变量，判断是否有空闲的container
 	var res *ContainerInfo
+	var isAttainLogInterval = false
+
+	if cp.NeedLog {
+		mutex.Lock()
+		if NowLogInterval == cp.LogPrintInterval {
+			isAttainLogInterval = true
+			NowLogInterval = 0
+		} else {
+			NowLogInterval += 1
+		}
+		mutex.Unlock()
+	}
 
 	// 取函数对应的容器信息
 	r.functionMap.SetIfAbsent(req.FunctionName, &FunctionStatus{
@@ -151,14 +170,17 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	}
 	node.Unlock()
 
-	// 打印节点信息
-	now := time.Now().UnixNano()
-	nodeGS, _ := node.GetStats(ctx, &nsPb.GetStatsRequest{
-		RequestId: req.RequestId,
-	})
-	latency := (time.Now().UnixNano() - now) / 1e6
-	data, _ := json.MarshalIndent(nodeGS, "", "    ")
-	logger.Infof("node %s status:\nlatency:%d\n%s\n", res.address, latency, data)
+	if isAttainLogInterval {
+		// 打印节点信息
+		now := time.Now().UnixNano()
+		nodeGS, _ := node.GetStats(ctx, &nsPb.GetStatsRequest{
+			RequestId: req.RequestId,
+		})
+		latency := (time.Now().UnixNano() - now) / 1e6
+		data, _ := json.MarshalIndent(nodeGS, "", "    ")
+		logger.Infof("\nnow_request_id: %s\nnode %s status:\nlatency:%d\n%s",
+			req.RequestId, res.address, latency, data)
+	}
 
 	requestStatus := &RequestStatus{
 		FunctionName:        req.FunctionName,
@@ -166,6 +188,7 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		ContainerId:         res.id,
 		RequireMemory:       req.FunctionConfig.MemoryInBytes,
 		ActualRequireMemory: actualRequireMemory,
+		IsAttainLogInterval: isAttainLogInterval,
 	}
 
 	r.RequestMap.Set(req.RequestId, requestStatus)
@@ -188,13 +211,13 @@ func (r *Router) getNode(accountId string, memoryReq int64) (*NodeInfo, error) {
 	}
 
 	// 需要申请新节点时，打印其他所有节点信息
-	logger.Infof("now other node info:\n")
+	logger.Infof("now other node info:")
 	for _, key := range sortedKeys(r.nodeMap.Keys()) {
 		nmObj, _ := r.nodeMap.Get(key)
 		node := nmObj.(*NodeInfo)
 		nodeGS, _ := node.GetStats(context.Background(), &nsPb.GetStatsRequest{})
 		data, _ := json.MarshalIndent(nodeGS, "", "    ")
-		logger.Infof("node %s status:\n%s\n", node.address, data)
+		logger.Infof("node %s status:\n%s", node.address, data)
 	}
 
 	// 达到最大限制直接返回
@@ -263,6 +286,7 @@ func (r *Router) ReturnContainer(ctx context.Context, res *model.ResponseInfo) e
 	container.Unlock()
 
 	// 计算meanMaxMemoryUsage
+	functionStatus.Lock()
 	if functionStatus.meanMaxMemoryUsage == 0 {
 		functionStatus.meanMaxMemoryUsage = requestStatus.MaxMemoryUsage
 	} else {
@@ -271,6 +295,7 @@ func (r *Router) ReturnContainer(ctx context.Context, res *model.ResponseInfo) e
 				(1 + 1/functionStatus.successRequestNum)
 	}
 	functionStatus.successRequestNum += 1
+	functionStatus.Unlock()
 
 	nodeInfoObj, _ := r.nodeMap.Get(container.nodeId)
 	nodeInfo := nodeInfoObj.(*NodeInfo)

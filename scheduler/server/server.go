@@ -77,11 +77,14 @@ func (s *Server) ReturnContainer(ctx context.Context, req *pb.ReturnContainerReq
 	// 更新本次调用相关信息
 	requestStatusObj, _ := s.router.RequestMap.Get(req.RequestId)
 	requestStatus := requestStatusObj.(*core.RequestStatus)
-	requestStatus.ScheduleReturnContainerLatency = latency
-	requestStatus.ResponseTime = requestStatus.ScheduleAcquireContainerLatency +
-		requestStatus.ScheduleReturnContainerLatency + requestStatus.FunctionExecutionDuration
-	data, _ := json.MarshalIndent(requestStatus, "", "    ")
-	logger.Infof("\nrequest id: %s\n%s\n", req.RequestId, data)
+
+	if requestStatus.IsAttainLogInterval {
+		requestStatus.ScheduleReturnContainerLatency = latency
+		requestStatus.ResponseTime = requestStatus.ScheduleAcquireContainerLatency +
+			requestStatus.ScheduleReturnContainerLatency + requestStatus.FunctionExecutionDuration
+		data, _ := json.MarshalIndent(requestStatus, "", "    ")
+		logger.Infof("\nrequest id: %s\n%s", req.RequestId, data)
+	}
 
 	s.router.RequestMap.Remove(req.RequestId)
 
