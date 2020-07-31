@@ -17,6 +17,8 @@ type NodeInfo struct {
 	port                int64
 	availableMemInBytes int64
 
+	containers map[string]int // container_id -> status
+
 	conn *grpc.ClientConn
 	pb.NodeServiceClient
 }
@@ -32,6 +34,7 @@ func NewNode(nodeID, address string, port, memory int64) (*NodeInfo, error) {
 		address:             address,
 		port:                port,
 		availableMemInBytes: memory,
+		containers:          map[string]int{},
 		conn:                conn,
 		NodeServiceClient:   pb.NewNodeServiceClient(conn),
 	}, nil

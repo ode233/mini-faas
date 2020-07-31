@@ -2,6 +2,9 @@ package main
 
 import (
 	pb "aliyun/serverless/mini-faas/apiserver/proto"
+	"aliyun/serverless/mini-faas/scheduler/utils/logger"
+	"encoding/json"
+	"sync"
 
 	"google.golang.org/grpc"
 
@@ -16,6 +19,7 @@ type input struct {
 	param        string
 }
 
+// 这个参数不是时间，不能乱填
 var sampleEvents = map[string]string{
 	"dev_function_1": "1.2",
 	"dev_function_2": "",
@@ -23,6 +27,8 @@ var sampleEvents = map[string]string{
 	"dev_function_4": "50",
 	"dev_function_5": "",
 }
+
+var wg sync.WaitGroup
 
 func main() {
 	var apiserverEndpointPtr = flag.String("apiserverEndpoint", "0.0.0.0:10500", "endpoint of the apiserver")
@@ -46,18 +52,31 @@ func main() {
 		return
 	}
 
+	data, _ := json.MarshalIndent(lfReply.Functions, "", "    ")
+	logger.Infof("lfReply.Functions:\n%s", data)
+
 	for i := 0; i < 100; i++ {
 		for _, f := range lfReply.Functions {
 			e := sampleEvents[f.FunctionName]
 			event := fmt.Sprintf(`{"functionName": "%s", "param": "%s"}`, f.FunctionName, e)
-			invokeFunction(asClient, f.FunctionName, []byte(event))
+			for j := 0; j < 5; j++ {
+				//invokeFunction(asClient, f.FunctionName, []byte(event))
+				go invokeFunction(asClient, f.FunctionName, []byte(event))
+				wg.Add(1)
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
+	wg.Wait()
+	logger.Infof("finish invoke")
+	select {}
 }
 
 func invokeFunction(asClient pb.APIServerClient, functionName string, event []byte) {
-	fmt.Printf("Invoking function %s with event %s\n", functionName, string(event))
-	ctxAc, cancelAc := context.WithTimeout(context.Background(), 30*time.Second)
+	defer wg.Done()
+	logger.Infof("Invoking function %s with event %s\n", functionName, string(event))
+	// 本地30s测2500次会有大概100多次超时，调高一些
+	ctxAc, cancelAc := context.WithTimeout(context.Background(), 60*time.Second)
 	invkReply, err := asClient.InvokeFunction(ctxAc, &pb.InvokeFunctionRequest{
 		AccountId:    "test-account-id",
 		FunctionName: functionName,
@@ -65,9 +84,13 @@ func invokeFunction(asClient pb.APIServerClient, functionName string, event []by
 	})
 	cancelAc()
 	if err != nil {
-		fmt.Printf("Failed to invoke function %s due to %+v\n", functionName, err)
+		requestId := ""
+		if invkReply != nil {
+			requestId = invkReply.RequestId
+		}
+		logger.Infof("request id: %s, Failed to invoke function %s due to %+v\n", requestId, functionName, err)
 		return
 	}
 
-	fmt.Printf("Invoke function reply %+v\n", invkReply)
+	logger.Infof("request id: %s, Invoke function reply %+v\n", invkReply.RequestId, invkReply)
 }

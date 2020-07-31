@@ -4,7 +4,10 @@ go 1.14
 
 replace aliyun/serverless/mini-faas/apiserver => ../../apiserver
 
+replace aliyun/serverless/mini-faas => ../../
+
 require (
+	aliyun/serverless/mini-faas v0.0.0-00010101000000-000000000000
 	aliyun/serverless/mini-faas/apiserver v0.0.0-00010101000000-000000000000
 	github.com/cihub/seelog v0.0.0-20170130134532-f561c5e57575
 	github.com/fsnotify/fsnotify v1.4.9

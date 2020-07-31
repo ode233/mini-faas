@@ -33,11 +33,12 @@ func (s *Server) Start() {
 
 func (s *Server) AcquireContainer(ctx context.Context, req *pb.AcquireContainerRequest) (*pb.AcquireContainerReply, error) {
 	if req.AccountId == "" {
-		return nil, grpc.Errorf(codes.InvalidArgument, "account ID cannot be empty")
+		return nil, grpc.Errorf(codes.InvalidArgument, "account RequestID cannot be empty")
 	}
 	if req.FunctionConfig == nil {
 		return nil, grpc.Errorf(codes.InvalidArgument, "function config cannot be nil")
 	}
+	logger.Infof("request id: %s, request function name: %s", req.RequestId, req.FunctionName)
 	now := time.Now().UnixNano()
 	reply, err := s.router.AcquireContainer(ctx, req)
 	latency := (time.Now().UnixNano() - now) / 1e6
@@ -58,7 +59,7 @@ func (s *Server) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 func (s *Server) ReturnContainer(ctx context.Context, req *pb.ReturnContainerRequest) (*pb.ReturnContainerReply, error) {
 	now := time.Now().UnixNano()
 	err := s.router.ReturnContainer(ctx, &model.ResponseInfo{
-		ID:                    req.RequestId,
+		RequestID:             req.RequestId,
 		ContainerId:           req.ContainerId,
 		MaxMemoryUsageInBytes: req.MaxMemoryUsageInBytes,
 		DurationInNanos:       req.DurationInNanos / 1e6,
@@ -78,14 +79,13 @@ func (s *Server) ReturnContainer(ctx context.Context, req *pb.ReturnContainerReq
 	requestStatusObj, _ := s.router.RequestMap.Get(req.RequestId)
 	requestStatus := requestStatusObj.(*core.RequestStatus)
 
-	if requestStatus.IsAttainLogInterval {
-		requestStatus.ScheduleReturnContainerLatency = latency
-		requestStatus.ResponseTime = requestStatus.ScheduleAcquireContainerLatency +
-			requestStatus.ScheduleReturnContainerLatency + requestStatus.FunctionExecutionDuration
-		data, _ := json.MarshalIndent(requestStatus, "", "    ")
-		logger.Infof("\nrequest id: %s\n%s", req.RequestId, data)
-	}
+	requestStatus.ScheduleReturnContainerLatency = latency
+	requestStatus.ResponseTime = requestStatus.ScheduleAcquireContainerLatency +
+		requestStatus.ScheduleReturnContainerLatency + requestStatus.FunctionExecutionDuration
+	data, _ := json.MarshalIndent(requestStatus, "", "    ")
+	logger.Infof("\nrequest id: %s\n%s", req.RequestId, data)
 
+	logger.Infof("%s request finish, function name: %s", req.RequestId, requestStatus.FunctionName)
 	s.router.RequestMap.Remove(req.RequestId)
 
 	return &pb.ReturnContainerReply{}, nil
