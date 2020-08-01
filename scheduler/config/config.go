@@ -9,7 +9,7 @@ const (
 	FunctionNum = 15
 
 	MaxContainerNum     = (4 * 1024 / 512) * MaxNodeNum / FunctionNum
-	ReserveContainerNum = 2
+	ReserveContainerNum = (4 * 1024 / 512) * ReserveNodeNum / FunctionNum
 
 	// 隔多少次请求打印一次节点日志
 	LogPrintInterval = 20
