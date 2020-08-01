@@ -2,8 +2,7 @@ package core
 
 import (
 	"fmt"
-	"sync"
-
+	cmap "github.com/orcaman/concurrent-map"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 
@@ -11,13 +10,14 @@ import (
 )
 
 type NodeInfo struct {
-	sync.Mutex
 	nodeID              string
 	address             string
 	port                int64
 	availableMemInBytes int64
 
-	containers map[string]int // container_id -> status
+	isReserved bool
+
+	containers cmap.ConcurrentMap // container_id -> status
 
 	conn *grpc.ClientConn
 	pb.NodeServiceClient
@@ -29,12 +29,12 @@ func NewNode(nodeID, address string, port, memory int64) (*NodeInfo, error) {
 		return nil, errors.WithStack(err)
 	}
 	return &NodeInfo{
-		Mutex:               sync.Mutex{},
 		nodeID:              nodeID,
 		address:             address,
 		port:                port,
 		availableMemInBytes: memory,
-		containers:          map[string]int{},
+		isReserved:          false,
+		containers:          cmap.New(),
 		conn:                conn,
 		NodeServiceClient:   pb.NewNodeServiceClient(conn),
 	}, nil
