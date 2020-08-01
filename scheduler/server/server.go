@@ -50,6 +50,7 @@ func (s *Server) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		}).Errorf("Failed to acquire due to %v", err)
 		return nil, err
 	}
+	logger.Infof("request id: %s, AcquireContainer, Latency: %d", req.RequestId, latency)
 	requestStatusObj, _ := s.router.RequestMap.Get(req.RequestId)
 	requestStatus := requestStatusObj.(*core.RequestStatus)
 	requestStatus.ScheduleAcquireContainerLatency = latency
@@ -80,8 +81,7 @@ func (s *Server) ReturnContainer(ctx context.Context, req *pb.ReturnContainerReq
 	requestStatus := requestStatusObj.(*core.RequestStatus)
 
 	requestStatus.ScheduleReturnContainerLatency = latency
-	requestStatus.ResponseTime = requestStatus.ScheduleAcquireContainerLatency +
-		requestStatus.ScheduleReturnContainerLatency + requestStatus.FunctionExecutionDuration
+	requestStatus.ResponseTime = requestStatus.ScheduleAcquireContainerLatency + requestStatus.FunctionExecutionDuration
 	data, _ := json.MarshalIndent(requestStatus, "", "    ")
 	logger.Infof("\nrequest id: %s\n%s", req.RequestId, data)
 

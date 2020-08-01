@@ -99,6 +99,7 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	r.functionMap.SetIfAbsent(req.FunctionName, &FunctionStatus{
 		SuccessRequestNum:  0,
 		MeanMaxMemoryUsage: 0,
+		functionReturned:   make(chan struct{}),
 		ContainerMap: &LockMap{
 			Internal: cmap.New(),
 		},
@@ -175,8 +176,8 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 			now := time.Now().UnixNano()
 			for {
 				// todo use channel
-				time.Sleep(200 * time.Millisecond)
-				//<-functionStatus.functionReturned
+				//time.Sleep(200 * time.Millisecond)
+				<-functionStatus.functionReturned
 				// 重新获取actualRequireMemory
 				actualRequireMemory = functionStatus.MeanMaxMemoryUsage
 
@@ -200,33 +201,28 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		}
 	}
 
-	nodeObj, ok := r.nodeMap.Internal.Get(res.nodeId)
-	if !ok {
-		data, _ := json.MarshalIndent(r.nodeMap.Internal, "", "    ")
-		logger.Errorf("fail to get node info, %s\nnow node map\n:%s", res.nodeId, data)
-	} else {
+	if isAttainLogInterval {
+		nodeObj, _ := r.nodeMap.Internal.Get(res.nodeId)
 		node := nodeObj.(*NodeInfo)
-		if isAttainLogInterval {
-			// 打印节点信息
-			now := time.Now().UnixNano()
-			nodeGS, err := node.GetStats(ctx, &nsPb.GetStatsRequest{
-				RequestId: req.RequestId,
-			})
-			latency := (time.Now().UnixNano() - now) / 1e6
-			if err != nil {
-				logger.Errorf("fail to get node status, latency: %d", latency)
-			} else {
-				data, _ := json.MarshalIndent(nodeGS, "", "    ")
-				logger.Infof("\nnow_request_id: %s"+
-					"\nget node status latency:%d"+
-					"\nmy compute node AvailableMemInBytes:%d"+
-					"\nnode %s status:"+
-					"\n%s",
-					req.RequestId, latency, node.availableMemInBytes, res.address, data)
-				data, _ = json.MarshalIndent(r.functionMap, "", "    ")
-				// 比较该节点上容器的实际可用内存值和我计算的可用内存值（我计算的值考虑了这次请求所需的内存）
-				logger.Infof("\nnow function map: %s", data)
-			}
+		// 打印节点信息
+		now := time.Now().UnixNano()
+		nodeGS, err := node.GetStats(ctx, &nsPb.GetStatsRequest{
+			RequestId: req.RequestId,
+		})
+		latency := (time.Now().UnixNano() - now) / 1e6
+		if err != nil {
+			logger.Errorf("fail to get node status, latency: %d", latency)
+		} else {
+			data, _ := json.MarshalIndent(nodeGS, "", "    ")
+			logger.Infof("\nnow_request_id: %s"+
+				"\nget node status latency:%d"+
+				"\nmy compute node AvailableMemInBytes:%d"+
+				"\nnode %s status:"+
+				"\n%s",
+				req.RequestId, latency, node.availableMemInBytes, res.address, data)
+			data, _ = json.MarshalIndent(r.functionMap, "", "    ")
+			// 比较该节点上容器的实际可用内存值和我计算的可用内存值（我计算的值考虑了这次请求所需的内存）
+			logger.Infof("\nnow function map: %s", data)
 		}
 	}
 
@@ -355,46 +351,45 @@ func (r *Router) ReturnContainer(ctx context.Context, res *model.ResponseInfo) e
 	atomic.AddInt64(&(container.AvailableMemInBytes), requestStatus.ActualRequireMemory)
 	container.requests.Remove(res.RequestID)
 
-	//go func() {
-	//	functionStatus.functionReturned <- struct{}{}
-	//}()
+	timeout := time.NewTimer(time.Microsecond * 100)
+
+	select {
+	case functionStatus.functionReturned <- struct{}{}:
+	case <-timeout.C:
+	}
 
 	// RemoveContainer的时候一定要锁，防止要删除的container被使用
 	// 释放容器判断， 使保留的容器都尽量在相同的节点上
 	containerMap.Lock()
 	if container.requests.Count() < 1 && functionStatus.ContainerMap.Internal.Count() > cp.ReserveContainerNum {
-		nodeObj, ok := r.nodeMap.Internal.Get(container.nodeId)
-		if !ok {
-			data, _ := json.MarshalIndent(r.nodeMap.Internal, "", "    ")
-			logger.Errorf("fail to get node info, %s\nnow node map\n:%s", container.nodeId, data)
-		} else {
-			node := nodeObj.(*NodeInfo)
-			if !node.isReserved {
-				node.requests.Remove(container.ContainerId)
-				functionStatus.ContainerMap.Internal.Remove(container.ContainerId)
-				// 不需要管返回值，反正请求完成了释放就行了
-				go node.RemoveContainer(ctx, &nsPb.RemoveContainerRequest{
-					RequestId:   res.RequestID,
-					ContainerId: container.ContainerId,
+		nodeObj, _ := r.nodeMap.Internal.Get(container.nodeId)
+		node := nodeObj.(*NodeInfo)
+		if !node.isReserved {
+			node.requests.Remove(res.RequestID)
+			functionStatus.ContainerMap.Internal.Remove(container.ContainerId)
+			// 不需要管返回值，反正请求完成了释放就行了
+			go node.RemoveContainer(ctx, &nsPb.RemoveContainerRequest{
+				RequestId:   res.RequestID,
+				ContainerId: container.ContainerId,
+			})
+			logger.Infof("success to release container")
+			// ReleaseNode的时候一定要锁，防止要删除的node被使用
+			// 容器删除的时候才考虑释放node，因为可能需要预留容器
+			r.nodeMap.Lock()
+			if node.requests.Count() < 1 {
+				r.nodeMap.Internal.Remove(node.nodeID)
+				go r.rmClient.ReleaseNode(ctx, &rmPb.ReleaseNodeRequest{
+					RequestId: res.RequestID,
+					Id:        node.nodeID,
 				})
-				logger.Infof("success to release container")
-				// ReleaseNode的时候一定要锁，防止要删除的node被使用
-				// 容器删除的时候才考虑释放node，因为可能需要预留容器
-				r.nodeMap.Lock()
-				if node.requests.Count() < 1 {
-					r.nodeMap.Internal.Remove(node.nodeID)
-					go r.rmClient.ReleaseNode(ctx, &rmPb.ReleaseNodeRequest{
-						RequestId: res.RequestID,
-						Id:        node.nodeID,
-					})
-					logger.Infof("success to release node, id: %s", node.nodeID)
-				} else {
-					node.availableMemInBytes += requestStatus.RequireMemory
-				}
-				r.nodeMap.Unlock()
+				logger.Infof("success to release node, id: %s", node.nodeID)
+			} else {
+				node.availableMemInBytes += requestStatus.RequireMemory
 			}
+			r.nodeMap.Unlock()
 		}
 	}
+
 	containerMap.Unlock()
 
 	// 计算meanMaxMemoryUsage
@@ -431,22 +426,18 @@ func (r *Router) findAvailableContainer(containerMap *LockMap, actualRequireMemo
 					allNodeContainerBest = container
 				}
 			}
-			nodeObj, ok := r.nodeMap.Internal.Get(container.nodeId)
-			if !ok {
-				data, _ := json.MarshalIndent(r.nodeMap.Internal, "", "    ")
-				logger.Errorf("fail to get node info, %s\nnow node map\n:%s", container.nodeId, data)
-			} else {
-				node := nodeObj.(*NodeInfo)
-				if node.isReserved {
-					if reservedNodeContainerBest == nil {
+			nodeObj, _ := r.nodeMap.Internal.Get(container.nodeId)
+			node := nodeObj.(*NodeInfo)
+			if node.isReserved {
+				if reservedNodeContainerBest == nil {
+					reservedNodeContainerBest = container
+				} else {
+					if container.AvailableMemInBytes < reservedNodeContainerBest.AvailableMemInBytes {
 						reservedNodeContainerBest = container
-					} else {
-						if container.AvailableMemInBytes < reservedNodeContainerBest.AvailableMemInBytes {
-							reservedNodeContainerBest = container
-						}
 					}
 				}
 			}
+
 		}
 	}
 	if reservedNodeContainerBest != nil {

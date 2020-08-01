@@ -3,7 +3,7 @@ package config
 const (
 	DefaultPort = 10450
 
-	MaxNodeNum     = 20
+	MaxNodeNum     = 10
 	ReserveNodeNum = 5
 
 	FunctionNum = 15
@@ -13,7 +13,7 @@ const (
 
 	// 隔多少次请求打印一次节点日志
 	LogPrintInterval = 20
-	NeedLog          = true
+	NeedLog          = false
 )
 
 var Global = &Config{}
