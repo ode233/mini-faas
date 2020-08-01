@@ -5,11 +5,14 @@ import (
 	cmap "github.com/orcaman/concurrent-map"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
+	"sync"
 
 	pb "aliyun/serverless/mini-faas/nodeservice/proto"
 )
 
 type NodeInfo struct {
+	sync.Mutex
+
 	nodeID              string
 	address             string
 	port                int64
@@ -17,7 +20,9 @@ type NodeInfo struct {
 
 	isReserved bool
 
-	containers cmap.ConcurrentMap // container_id -> status
+	// 一定存request而不是container，
+	//因为由于container的创建要等待，那么就无法立马存入container_id，可能导致正在创建container的节点被误认为没有使用，导致被误删。
+	requests cmap.ConcurrentMap // requests_id -> status
 
 	conn *grpc.ClientConn
 	pb.NodeServiceClient
@@ -34,7 +39,7 @@ func NewNode(nodeID, address string, port, memory int64) (*NodeInfo, error) {
 		port:                port,
 		availableMemInBytes: memory,
 		isReserved:          false,
-		containers:          cmap.New(),
+		requests:            cmap.New(),
 		conn:                conn,
 		NodeServiceClient:   pb.NewNodeServiceClient(conn),
 	}, nil

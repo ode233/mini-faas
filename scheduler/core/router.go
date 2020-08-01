@@ -52,7 +52,7 @@ type ContainerInfo struct {
 
 type LockMap struct {
 	sync.Mutex
-	internal cmap.ConcurrentMap
+	Internal cmap.ConcurrentMap
 }
 
 type Router struct {
@@ -68,7 +68,7 @@ func NewRouter(config *cp.Config, rmClient rmPb.ResourceManagerClient) *Router {
 	// 取结构体地址表示实例化
 	return &Router{
 		nodeMap: &LockMap{
-			internal: cmap.New(),
+			Internal: cmap.New(),
 		},
 		functionMap: cmap.New(),
 		RequestMap:  cmap.New(),
@@ -78,7 +78,7 @@ func NewRouter(config *cp.Config, rmClient rmPb.ResourceManagerClient) *Router {
 
 // 给结构体类型的引用添加方法，相当于添加实例方法，直接给结构体添加方法相当于静态方法
 func (r *Router) Start() {
-	// Just in case the router has internal loops.
+	// Just in case the router has Internal loops.
 }
 
 func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerRequest) (*pb.AcquireContainerReply, error) {
@@ -100,7 +100,7 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		SuccessRequestNum:  0,
 		MeanMaxMemoryUsage: 0,
 		ContainerMap: &LockMap{
-			internal: cmap.New(),
+			Internal: cmap.New(),
 		},
 	})
 	fmObj, _ := r.functionMap.Get(req.FunctionName)
@@ -116,7 +116,7 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	// 获取使用的容器信息
 	containerMap := functionStatus.ContainerMap
 	containerMap.Lock()
-	res = r.findAvailableContainer(containerMap, actualRequireMemory)
+	res = r.findAvailableContainer(containerMap, actualRequireMemory, req.RequestId)
 	if res != nil {
 		// 减少该容器可使用内存
 		res.AvailableMemInBytes -= actualRequireMemory
@@ -128,9 +128,9 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		// 为什么写在条件里会死锁？
 		containerMap.Unlock()
 		// 这里是否要加锁？
-		if len(functionStatus.ContainerMap.internal) < cp.MaxContainerNum { // 创建新容器
-			//functionStatus.Unlock()
+		if functionStatus.ContainerMap.Internal.Count() < cp.MaxContainerNum { // 创建新容器
 			// 获取一个node，有满足容器内存要求的node直接返回该node，否则申请一个新的node返回
+			// 容器大小取多少？
 			node, err := r.getNode(req.AccountId, req.FunctionConfig.MemoryInBytes, req)
 			if err != nil {
 				createContainerErr = err
@@ -150,6 +150,8 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 				})
 				if err != nil {
 					atomic.AddInt64(&(node.availableMemInBytes), req.FunctionConfig.MemoryInBytes)
+					// 没有创建成功则删除
+					node.requests.Remove(req.RequestId)
 					r.handleContainerErr(node, req.FunctionConfig.MemoryInBytes)
 					createContainerErr = errors.Wrapf(err, "failed to create container on %s", node.address)
 				} else {
@@ -163,15 +165,13 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 					}
 					// 新键的容器还没添加进containerMap所以不用锁
 					res.requests.Set(req.RequestId, 1)
-					containerMap.internal.Set(res.ContainerId, res)
-					node.containers.Set(res.ContainerId, 1)
+					containerMap.Internal.Set(res.ContainerId, res)
 					logger.Infof("request id: %s, create container", req.RequestId)
 				}
 			}
 		}
 		if res == nil { // 等待空闲容器
 			logger.Errorf("wait reason: %v", createContainerErr)
-			//functionStatus.Unlock()
 			now := time.Now().UnixNano()
 			for {
 				// todo use channel
@@ -181,7 +181,7 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 				actualRequireMemory = functionStatus.MeanMaxMemoryUsage
 
 				containerMap.Lock()
-				res = r.findAvailableContainer(containerMap, actualRequireMemory)
+				res = r.findAvailableContainer(containerMap, actualRequireMemory, req.RequestId)
 
 				latency := time.Now().UnixNano() - now
 				if res != nil {
@@ -200,28 +200,33 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		}
 	}
 
-	nodeObj, _ := r.nodeMap.internal.Get(res.nodeId)
-	node := nodeObj.(*NodeInfo)
-	if isAttainLogInterval {
-		// 打印节点信息
-		now := time.Now().UnixNano()
-		nodeGS, err := node.GetStats(ctx, &nsPb.GetStatsRequest{
-			RequestId: req.RequestId,
-		})
-		latency := (time.Now().UnixNano() - now) / 1e6
-		if err != nil {
-			logger.Errorf("fail to get node status, latency: %d", latency)
-		} else {
-			data, _ := json.MarshalIndent(nodeGS, "", "    ")
-			logger.Infof("\nnow_request_id: %s"+
-				"\nget node status latency:%d"+
-				"\nmy compute node AvailableMemInBytes:%d"+
-				"\nnode %s status:"+
-				"\n%s",
-				req.RequestId, latency, node.availableMemInBytes, res.address, data)
-			data, _ = json.MarshalIndent(r.functionMap, "", "    ")
-			// 比较该节点上容器的实际可用内存值和我计算的可用内存值（我计算的值考虑了这次请求所需的内存）
-			logger.Infof("\nnow function map: %s", data)
+	nodeObj, ok := r.nodeMap.Internal.Get(res.nodeId)
+	if !ok {
+		data, _ := json.MarshalIndent(r.nodeMap.Internal, "", "    ")
+		logger.Errorf("fail to get node info, %s\nnow node map\n:%s", res.nodeId, data)
+	} else {
+		node := nodeObj.(*NodeInfo)
+		if isAttainLogInterval {
+			// 打印节点信息
+			now := time.Now().UnixNano()
+			nodeGS, err := node.GetStats(ctx, &nsPb.GetStatsRequest{
+				RequestId: req.RequestId,
+			})
+			latency := (time.Now().UnixNano() - now) / 1e6
+			if err != nil {
+				logger.Errorf("fail to get node status, latency: %d", latency)
+			} else {
+				data, _ := json.MarshalIndent(nodeGS, "", "    ")
+				logger.Infof("\nnow_request_id: %s"+
+					"\nget node status latency:%d"+
+					"\nmy compute node AvailableMemInBytes:%d"+
+					"\nnode %s status:"+
+					"\n%s",
+					req.RequestId, latency, node.availableMemInBytes, res.address, data)
+				data, _ = json.MarshalIndent(r.functionMap, "", "    ")
+				// 比较该节点上容器的实际可用内存值和我计算的可用内存值（我计算的值考虑了这次请求所需的内存）
+				logger.Infof("\nnow function map: %s", data)
+			}
 		}
 	}
 
@@ -245,34 +250,27 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 
 func (r *Router) getNode(accountId string, memoryReq int64, req *pb.AcquireContainerRequest) (*NodeInfo, error) {
 	var node *NodeInfo
-	// 取满足要求情况下，资源最少的节点，以达到紧密排布
+
 	r.nodeMap.Lock()
-	for _, key := range r.nodeMap.internal.Keys() {
-		nodeObj, _ := r.nodeMap.internal.Get(key)
-		nowNode := nodeObj.(*NodeInfo)
-		if nowNode.availableMemInBytes > memoryReq {
-			if node == nil {
-				node = nowNode
-			} else {
-				if nowNode.availableMemInBytes < node.availableMemInBytes {
-					node = nowNode
-				}
-			}
-		}
-	}
+	node = r.findAvailableNode(memoryReq)
+
 	if node != nil {
 		// 根据创建的容器所需的内存减少当前节点的内存使用值, 先减，没创建成功再加回来
 		node.availableMemInBytes -= req.FunctionConfig.MemoryInBytes
+		// 存入request id 防止被误删
+		node.requests.Set(req.RequestId, 1)
 		r.nodeMap.Unlock()
+		logger.Infof("rq id: %s, get exist node: %s", req.RequestId, node.nodeID)
 		return node, nil
 	} else {
-		r.nodeMap.Unlock()
 
 		// 这里是否要加锁？
+		// 可能当前读的时候是小于，但是其实有一个节点正在添加中了
 		// 达到最大限制直接返回
-		if len(r.nodeMap.internal) >= cp.MaxNodeNum {
+		if r.nodeMap.Internal.Count() >= cp.MaxNodeNum {
 			return nil, errors.Errorf("node maximum limit reached")
 		}
+		r.nodeMap.Unlock()
 
 		// 超时没有请求到节点就取消
 		ctxR, cancelR := context.WithTimeout(context.Background(), 30*time.Second)
@@ -293,10 +291,18 @@ func (r *Router) getNode(accountId string, memoryReq int64, req *pb.AcquireConta
 		if err != nil {
 			return nil, errors.Errorf("Failed to NewNode %v", err)
 		}
-		r.nodeMap.internal.Set(nodeDesc.Id, node)
-		if len(r.nodeMap.internal) < cp.ReserveNodeNum {
+
+		// 不加锁可能出现两个同时写，之后读的时候本来有一个是可以保留的，但是读的是都是最新值导致都没法保留
+		r.nodeMap.Lock()
+		r.nodeMap.Internal.Set(nodeDesc.Id, node)
+		data, _ := json.MarshalIndent(r.nodeMap.Internal, "", "    ")
+		logger.Infof("node map %s", data)
+		logger.Infof("ReserveNode id: %s", nodeDesc.Id)
+		if r.nodeMap.Internal.Count() < cp.ReserveNodeNum {
 			node.isReserved = true
 		}
+		node.requests.Set(req.RequestId, 1)
+		r.nodeMap.Unlock()
 
 		// 用node.GetStats重置可用内存
 		//nodeGS, _ := node.GetStats(context.Background(), &nsPb.GetStatsRequest{})
@@ -305,8 +311,8 @@ func (r *Router) getNode(accountId string, memoryReq int64, req *pb.AcquireConta
 		//申请新节点时，打印所有节点信息
 		if cp.NeedLog {
 			logger.Infof("get node: %s, all node info:", node.address)
-			for _, key := range r.nodeMap.internal.Keys() {
-				nodeObj, _ := r.nodeMap.internal.Get(key)
+			for _, key := range r.nodeMap.Internal.Keys() {
+				nodeObj, _ := r.nodeMap.Internal.Get(key)
 				node := nodeObj.(*NodeInfo)
 				nodeGS, err := node.GetStats(context.Background(), &nsPb.GetStatsRequest{})
 				if err != nil {
@@ -339,11 +345,12 @@ func (r *Router) ReturnContainer(ctx context.Context, res *model.ResponseInfo) e
 		return errors.Errorf("no container acquired for the request %s", res.RequestID)
 	}
 	functionStatus := fmObj.(*FunctionStatus)
-	containerObj, ok := functionStatus.ContainerMap.internal.Get(res.ContainerId)
-	container := containerObj.(*ContainerInfo)
+	containerMap := functionStatus.ContainerMap
+	containerObj, ok := containerMap.Internal.Get(res.ContainerId)
 	if !ok {
 		return errors.Errorf("no container found with ContainerId %s", res.ContainerId)
 	}
+	container := containerObj.(*ContainerInfo)
 
 	atomic.AddInt64(&(container.AvailableMemInBytes), requestStatus.ActualRequireMemory)
 	container.requests.Remove(res.RequestID)
@@ -352,32 +359,43 @@ func (r *Router) ReturnContainer(ctx context.Context, res *model.ResponseInfo) e
 	//	functionStatus.functionReturned <- struct{}{}
 	//}()
 
-	// 需要锁防止是要将被删除的容器
+	// RemoveContainer的时候一定要锁，防止要删除的container被使用
 	// 释放容器判断， 使保留的容器都尽量在相同的节点上
-	if container.requests.Count() < 1 && len(functionStatus.ContainerMap.internal) > cp.ReserveContainerNum {
-		nodeObj, _ := r.nodeMap.internal.Get(container.nodeId)
-		node := nodeObj.(*NodeInfo)
-		if !node.isReserved {
-			node.containers.Remove(container.ContainerId)
-			functionStatus.ContainerMap.internal.Remove(container.ContainerId)
-			// 不需要管返回值，反正请求完成了释放就行了
-			go node.RemoveContainer(ctx, &nsPb.RemoveContainerRequest{
-				RequestId:   res.RequestID,
-				ContainerId: container.ContainerId,
-			})
-			logger.Infof("success to release container")
-			if node.containers.Count() < 1 {
-				r.nodeMap.internal.Remove(node.nodeID)
-				go r.rmClient.ReleaseNode(ctx, &rmPb.ReleaseNodeRequest{
-					RequestId: res.RequestID,
-					Id:        node.nodeID,
+	containerMap.Lock()
+	if container.requests.Count() < 1 && functionStatus.ContainerMap.Internal.Count() > cp.ReserveContainerNum {
+		nodeObj, ok := r.nodeMap.Internal.Get(container.nodeId)
+		if !ok {
+			data, _ := json.MarshalIndent(r.nodeMap.Internal, "", "    ")
+			logger.Errorf("fail to get node info, %s\nnow node map\n:%s", container.nodeId, data)
+		} else {
+			node := nodeObj.(*NodeInfo)
+			if !node.isReserved {
+				node.requests.Remove(container.ContainerId)
+				functionStatus.ContainerMap.Internal.Remove(container.ContainerId)
+				// 不需要管返回值，反正请求完成了释放就行了
+				go node.RemoveContainer(ctx, &nsPb.RemoveContainerRequest{
+					RequestId:   res.RequestID,
+					ContainerId: container.ContainerId,
 				})
-				logger.Infof("success to release node")
-			} else {
-				node.availableMemInBytes += requestStatus.RequireMemory
+				logger.Infof("success to release container")
+				// ReleaseNode的时候一定要锁，防止要删除的node被使用
+				// 容器删除的时候才考虑释放node，因为可能需要预留容器
+				r.nodeMap.Lock()
+				if node.requests.Count() < 1 {
+					r.nodeMap.Internal.Remove(node.nodeID)
+					go r.rmClient.ReleaseNode(ctx, &rmPb.ReleaseNodeRequest{
+						RequestId: res.RequestID,
+						Id:        node.nodeID,
+					})
+					logger.Infof("success to release node, id: %s", node.nodeID)
+				} else {
+					node.availableMemInBytes += requestStatus.RequireMemory
+				}
+				r.nodeMap.Unlock()
 			}
 		}
 	}
+	containerMap.Unlock()
 
 	// 计算meanMaxMemoryUsage
 	if functionStatus.MeanMaxMemoryUsage == 0 {
@@ -399,36 +417,82 @@ func (r *Router) ReturnContainer(ctx context.Context, res *model.ResponseInfo) e
 }
 
 // 遍历查找满足要求情况下剩余资源最少的容器，以达到紧密排布, 优先选取保留节点
-func (r *Router) findAvailableContainer(containerMap *LockMap, actualRequireMemory int64) *ContainerInfo {
-	var allNodeContainer *ContainerInfo
-	var reservedNodeContainer *ContainerInfo
-	for _, key := range containerMap.internal.Keys() {
-		containerObj, _ := containerMap.internal.Get(key)
+func (r *Router) findAvailableContainer(containerMap *LockMap, actualRequireMemory int64, requestId string) *ContainerInfo {
+	var allNodeContainerBest *ContainerInfo
+	var reservedNodeContainerBest *ContainerInfo
+	for _, key := range containerMap.Internal.Keys() {
+		containerObj, _ := containerMap.Internal.Get(key)
 		container := containerObj.(*ContainerInfo)
 		if container.AvailableMemInBytes > actualRequireMemory {
-			if allNodeContainer == nil {
-				allNodeContainer = container
+			if allNodeContainerBest == nil {
+				allNodeContainerBest = container
 			} else {
-				if container.AvailableMemInBytes < allNodeContainer.AvailableMemInBytes {
-					allNodeContainer = container
+				if container.AvailableMemInBytes < allNodeContainerBest.AvailableMemInBytes {
+					allNodeContainerBest = container
 				}
 			}
-			nodeObj, _ := r.nodeMap.internal.Get(container.nodeId)
-			node := nodeObj.(*NodeInfo)
-			if node.isReserved {
-				if reservedNodeContainer == nil {
-					reservedNodeContainer = container
-				} else {
-					if container.AvailableMemInBytes < reservedNodeContainer.AvailableMemInBytes {
-						reservedNodeContainer = container
+			nodeObj, ok := r.nodeMap.Internal.Get(container.nodeId)
+			if !ok {
+				data, _ := json.MarshalIndent(r.nodeMap.Internal, "", "    ")
+				logger.Errorf("fail to get node info, %s\nnow node map\n:%s", container.nodeId, data)
+			} else {
+				node := nodeObj.(*NodeInfo)
+				if node.isReserved {
+					if reservedNodeContainerBest == nil {
+						reservedNodeContainerBest = container
+					} else {
+						if container.AvailableMemInBytes < reservedNodeContainerBest.AvailableMemInBytes {
+							reservedNodeContainerBest = container
+						}
 					}
 				}
 			}
 		}
 	}
-	if reservedNodeContainer != nil {
-		return reservedNodeContainer
+	if reservedNodeContainerBest != nil {
+		nodeObj, _ := r.nodeMap.Internal.Get(reservedNodeContainerBest.nodeId)
+		node := nodeObj.(*NodeInfo)
+		node.requests.Set(requestId, 1)
+		return reservedNodeContainerBest
 	} else {
-		return allNodeContainer
+		if allNodeContainerBest != nil {
+			nodeObj, _ := r.nodeMap.Internal.Get(allNodeContainerBest.nodeId)
+			node := nodeObj.(*NodeInfo)
+			node.requests.Set(requestId, 1)
+		}
+		return allNodeContainerBest
+	}
+}
+
+// 取满足要求情况下，资源最少的节点，以达到紧密排布, 优先取保留节点
+func (r *Router) findAvailableNode(memoryReq int64) *NodeInfo {
+	var allNodeBest *NodeInfo
+	var reservedNodeBest *NodeInfo
+	for _, key := range r.nodeMap.Internal.Keys() {
+		nodeObj, _ := r.nodeMap.Internal.Get(key)
+		nowNode := nodeObj.(*NodeInfo)
+		if nowNode.availableMemInBytes > memoryReq {
+			if allNodeBest == nil {
+				allNodeBest = nowNode
+			} else {
+				if nowNode.availableMemInBytes < allNodeBest.availableMemInBytes {
+					allNodeBest = nowNode
+				}
+			}
+			if nowNode.isReserved {
+				if reservedNodeBest == nil {
+					reservedNodeBest = nowNode
+				} else {
+					if nowNode.availableMemInBytes < reservedNodeBest.availableMemInBytes {
+						reservedNodeBest = nowNode
+					}
+				}
+			}
+		}
+	}
+	if reservedNodeBest != nil {
+		return reservedNodeBest
+	} else {
+		return allNodeBest
 	}
 }
