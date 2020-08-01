@@ -1,8 +1,6 @@
 package config
 
 const (
-	DefaultPort = 10450
-
 	MaxNodeNum     = 10
 	ReserveNodeNum = 5
 
