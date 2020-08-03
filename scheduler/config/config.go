@@ -1,8 +1,8 @@
 package config
 
 const (
-	MaxNodeNum     = 10
-	ReserveNodeNum = 5
+	MaxNodeNum     = 20
+	ReserveNodeNum = 10
 
 	FunctionNum = 15
 

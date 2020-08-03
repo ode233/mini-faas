@@ -43,11 +43,7 @@ func (s *Server) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	reply, err := s.router.AcquireContainer(ctx, req)
 	latency := (time.Now().UnixNano() - now) / 1e6
 	if err != nil {
-		logger.WithFields(logger.Fields{
-			"Operation": "AcquireContainer",
-			"Latency":   latency,
-			"Error":     true,
-		}).Errorf("Failed to acquire due to %v", err)
+		logger.Errorf("Failed to acquire due to %v, Latency: %d", err, latency)
 		return nil, err
 	}
 	logger.Infof("request id: %s, AcquireContainer, Latency: %d", req.RequestId, latency)
@@ -69,11 +65,7 @@ func (s *Server) ReturnContainer(ctx context.Context, req *pb.ReturnContainerReq
 	latency := (time.Now().UnixNano() - now) / 1e6
 
 	if err != nil {
-		logger.WithFields(logger.Fields{
-			"Operation": "ReturnContainer",
-			"Latency":   latency,
-			"Error":     true,
-		}).Errorf("Failed to acquire due to %v", err)
+		logger.Errorf("Failed to return due to %v, Latency: %d", err, latency)
 		return nil, err
 	}
 	// 更新本次调用相关信息
