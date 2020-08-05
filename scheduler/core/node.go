@@ -14,11 +14,10 @@ type NodeInfo struct {
 	sync.Mutex
 
 	nodeID              string
+	nodeNo              string
 	address             string
 	port                int64
 	availableMemInBytes int64
-
-	reservedContainer cmap.ConcurrentMap // container_id -> status
 
 	// 一定存request而不是container，
 	//因为由于container的创建要等待，那么就无法立马存入container_id，可能导致正在创建container的节点被误认为没有使用，导致被误删。
@@ -28,17 +27,17 @@ type NodeInfo struct {
 	pb.NodeServiceClient
 }
 
-func NewNode(nodeID, address string, port, memory int64) (*NodeInfo, error) {
+func NewNode(nodeID, nodeNo string, address string, port, memory int64) (*NodeInfo, error) {
 	conn, err := grpc.Dial(fmt.Sprintf("%s:%d", address, port), grpc.WithInsecure())
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 	return &NodeInfo{
 		nodeID:              nodeID,
+		nodeNo:              nodeNo,
 		address:             address,
 		port:                port,
 		availableMemInBytes: memory,
-		reservedContainer:   cmap.New(),
 		requests:            cmap.New(),
 		conn:                conn,
 		NodeServiceClient:   pb.NewNodeServiceClient(conn),
