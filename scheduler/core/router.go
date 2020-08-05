@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	uuid "github.com/satori/go.uuid"
-	"go/constant"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -57,6 +56,7 @@ type ContainerInfo struct {
 type LockMap struct {
 	sync.Mutex
 	Internal cmap.ConcurrentMap
+	num      int64
 }
 
 type Router struct {
@@ -67,7 +67,6 @@ type Router struct {
 }
 
 var nowLogInterval = int64(0)
-var nowReserveNodeNum = int64(0)
 
 func NewRouter(config *cp.Config, rmClient rmPb.ResourceManagerClient) *Router {
 	// 取结构体地址表示实例化
@@ -199,6 +198,59 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	}, nil
 }
 
+func (r *Router) handleContainerErr(node *NodeInfo, functionMem int64) {
+}
+
+func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionStatus *FunctionStatus) (*ContainerInfo, error) {
+	var res *ContainerInfo
+	createContainerErr := errors.Errorf("")
+	// 获取一个node，有满足容器内存要求的node直接返回该node，否则申请一个新的node返回
+	// 容器大小取多少？
+	node, err := r.getNode(req.AccountId, req.FunctionConfig.MemoryInBytes, req)
+	if err != nil {
+		createContainerErr = err
+	} else {
+		// 在node上创建运行该函数的容器，并保存容器信息
+		ctx, cancel := context.WithTimeout(context.Background(), cp.Timout)
+		defer cancel()
+		now := time.Now().UnixNano()
+		replyC, err := node.CreateContainer(ctx, &nsPb.CreateContainerRequest{
+			Name: req.FunctionName + uuid.NewV4().String(),
+			FunctionMeta: &nsPb.FunctionMeta{
+				FunctionName:  req.FunctionName,
+				Handler:       req.FunctionConfig.Handler,
+				TimeoutInMs:   req.FunctionConfig.TimeoutInMs,
+				MemoryInBytes: req.FunctionConfig.MemoryInBytes,
+			},
+			RequestId: req.RequestId,
+		})
+		logger.Infof("CreateContainer, Latency: %d", (time.Now().UnixNano()-now)/1e6)
+		if err != nil {
+			atomic.AddInt64(&(node.availableMemInBytes), req.FunctionConfig.MemoryInBytes)
+			// 没有创建成功则删除
+			node.requests.Remove(req.RequestId)
+			r.handleContainerErr(node, req.FunctionConfig.MemoryInBytes)
+			createContainerErr = errors.Wrapf(err, "failed to create container on %s", node.address)
+		} else {
+			actualRequireMemory := atomic.LoadInt64(&(functionStatus.MeanMaxMemoryUsage))
+			res = &ContainerInfo{
+				ContainerId:         replyC.ContainerId,
+				address:             node.address,
+				port:                node.port,
+				nodeId:              node.nodeID,
+				AvailableMemInBytes: req.FunctionConfig.MemoryInBytes - actualRequireMemory,
+				requests:            cmap.New(),
+			}
+			// 新键的容器还没添加进containerMap所以不用锁
+			res.requests.Set(req.RequestId, 1)
+			functionStatus.OtherContainerMap.Internal.Set(
+				string(atomic.AddInt64(&(functionStatus.OtherContainerMap.num), 1)), res)
+			logger.Infof("request id: %s, create container", req.RequestId)
+		}
+	}
+	return res, createContainerErr
+}
+
 func (r *Router) getNode(accountId string, memoryReq int64, req *pb.AcquireContainerRequest) (*NodeInfo, error) {
 	var node *NodeInfo
 
@@ -241,7 +293,7 @@ func (r *Router) getNode(accountId string, memoryReq int64, req *pb.AcquireConta
 		//r.nodeMap.Lock()
 		atomic.AddInt64(&(node.availableMemInBytes), -req.FunctionConfig.MemoryInBytes)
 		node.requests.Set(req.RequestId, 1)
-		r.nodeMap.Internal.Set(string(atomic.AddInt64(&nowReserveNodeNum, 1)), node)
+		r.nodeMap.Internal.Set(string(atomic.AddInt64(&r.nodeMap.num, 1)), node)
 		data, _ := json.MarshalIndent(r.nodeMap.Internal, "", "    ")
 		logger.Infof("node map %s", data)
 		logger.Infof("ReserveNode id: %s", nodeDesc.Id)
@@ -273,7 +325,86 @@ func (r *Router) getNode(accountId string, memoryReq int64, req *pb.AcquireConta
 	}
 }
 
-func (r *Router) handleContainerErr(node *NodeInfo, functionMem int64) {
+// 遍历查找满足要求情况下剩余资源最少的容器，以达到紧密排布, 优先选取保留节点
+func (r *Router) getAvailableContainer(functionStatus *FunctionStatus, requestId string) *ContainerInfo {
+	var res *ContainerInfo
+	//containerMap.Lock()
+	for _, key := range functionStatus.ReservedContainerMap.Internal.Keys() {
+		containerObj, ok := functionStatus.ReservedContainerMap.Internal.Get(key)
+		if ok {
+			container := containerObj.(*ContainerInfo)
+			availableMemInBytes := atomic.LoadInt64(&(container.AvailableMemInBytes))
+			actualRequireMemory := atomic.LoadInt64(&(functionStatus.MeanMaxMemoryUsage))
+			if availableMemInBytes > actualRequireMemory {
+				res = container
+				break
+			}
+		}
+	}
+	if res == nil {
+		num := atomic.LoadInt64(&r.nodeMap.num)
+		for i := 1; i <= int(num); i++ {
+			containerObj, ok := functionStatus.OtherContainerMap.Internal.Get(string(i))
+			if ok {
+				container := containerObj.(*ContainerInfo)
+				availableMemInBytes := atomic.LoadInt64(&(container.AvailableMemInBytes))
+				actualRequireMemory := atomic.LoadInt64(&(functionStatus.MeanMaxMemoryUsage))
+				if availableMemInBytes > actualRequireMemory {
+					res = container
+					break
+				}
+			}
+		}
+	}
+	if reservedNodeContainerBest != nil {
+		nodeObj, ok := r.nodeMap.Internal.Get(reservedNodeContainerBest.nodeId)
+		if ok {
+			node := nodeObj.(*NodeInfo)
+			node.requests.Set(requestId, 1)
+			// 减少该容器可使用内存
+			atomic.AddInt64(&(reservedNodeContainerBest.AvailableMemInBytes), -actualRequireMemory)
+			reservedNodeContainerBest.requests.Set(requestId, 1)
+			res = reservedNodeContainerBest
+		}
+	} else {
+		if allNodeContainerBest != nil {
+			nodeObj, ok := r.nodeMap.Internal.Get(allNodeContainerBest.nodeId)
+			if ok {
+				node := nodeObj.(*NodeInfo)
+				node.requests.Set(requestId, 1)
+				atomic.AddInt64(&(allNodeContainerBest.AvailableMemInBytes), -actualRequireMemory)
+				allNodeContainerBest.requests.Set(requestId, 1)
+				res = allNodeContainerBest
+			}
+		}
+	}
+	//containerMap.Unlock()
+	return res
+}
+
+// 取满足要求情况下，资源最少的节点，以达到紧密排布, 优先取保留节点
+func (r *Router) getAvailableNode(memoryReq int64, req *pb.AcquireContainerRequest) *NodeInfo {
+	var res *NodeInfo
+	//r.nodeMap.Lock()
+
+	nodeNum := atomic.LoadInt64(&r.nodeMap.num)
+	for i := 1; i <= int(nodeNum); i++ {
+		nodeObj, ok := r.nodeMap.Internal.Get(string(i))
+		if ok {
+			nowNode := nodeObj.(*NodeInfo)
+			availableMemInBytes := atomic.LoadInt64(&(nowNode.availableMemInBytes))
+			if availableMemInBytes > memoryReq {
+				res = nowNode
+				// 根据创建的容器所需的内存减少当前节点的内存使用值, 先减，没创建成功再加回来
+				atomic.AddInt64(&(res.availableMemInBytes), -req.FunctionConfig.MemoryInBytes)
+				// 存入request id 防止被误删
+				res.requests.Set(req.RequestId, 1)
+				break
+			}
+		}
+	}
+	//r.nodeMap.Unlock()
+	return res
 }
 
 func (r *Router) ReturnContainer(ctx context.Context, res *model.ResponseInfo) error {
@@ -360,134 +491,4 @@ func (r *Router) ReturnContainer(ctx context.Context, res *model.ResponseInfo) e
 	//functionStatus.SuccessRequestNum += 1
 
 	return nil
-}
-
-func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionStatus *FunctionStatus) (*ContainerInfo, error) {
-	var res *ContainerInfo
-	createContainerErr := errors.Errorf("")
-	// 获取一个node，有满足容器内存要求的node直接返回该node，否则申请一个新的node返回
-	// 容器大小取多少？
-	node, err := r.getNode(req.AccountId, req.FunctionConfig.MemoryInBytes, req)
-	if err != nil {
-		createContainerErr = err
-	} else {
-		// 在node上创建运行该函数的容器，并保存容器信息
-		ctx, cancel := context.WithTimeout(context.Background(), cp.Timout)
-		defer cancel()
-		now := time.Now().UnixNano()
-		replyC, err := node.CreateContainer(ctx, &nsPb.CreateContainerRequest{
-			Name: req.FunctionName + uuid.NewV4().String(),
-			FunctionMeta: &nsPb.FunctionMeta{
-				FunctionName:  req.FunctionName,
-				Handler:       req.FunctionConfig.Handler,
-				TimeoutInMs:   req.FunctionConfig.TimeoutInMs,
-				MemoryInBytes: req.FunctionConfig.MemoryInBytes,
-			},
-			RequestId: req.RequestId,
-		})
-		logger.Infof("CreateContainer, Latency: %d", (time.Now().UnixNano()-now)/1e6)
-		if err != nil {
-			atomic.AddInt64(&(node.availableMemInBytes), req.FunctionConfig.MemoryInBytes)
-			// 没有创建成功则删除
-			node.requests.Remove(req.RequestId)
-			r.handleContainerErr(node, req.FunctionConfig.MemoryInBytes)
-			createContainerErr = errors.Wrapf(err, "failed to create container on %s", node.address)
-		} else {
-			actualRequireMemory := atomic.LoadInt64(&(functionStatus.MeanMaxMemoryUsage))
-			res = &ContainerInfo{
-				ContainerId:         replyC.ContainerId,
-				address:             node.address,
-				port:                node.port,
-				nodeId:              node.nodeID,
-				AvailableMemInBytes: req.FunctionConfig.MemoryInBytes - actualRequireMemory,
-				requests:            cmap.New(),
-			}
-			// 新键的容器还没添加进containerMap所以不用锁
-			res.requests.Set(req.RequestId, 1)
-			functionStatus.OtherContainerMap.Internal.Set(res.ContainerId, res)
-			logger.Infof("request id: %s, create container", req.RequestId)
-		}
-	}
-	return res, createContainerErr
-}
-
-// 遍历查找满足要求情况下剩余资源最少的容器，以达到紧密排布, 优先选取保留节点
-func (r *Router) getAvailableContainer(functionStatus *FunctionStatus, requestId string) *ContainerInfo {
-	var res *ContainerInfo
-	//containerMap.Lock()
-	for _, key := range functionStatus.ReservedContainerMap.Internal.Keys() {
-		containerObj, ok := functionStatus.ReservedContainerMap.Internal.Get(key)
-		if ok {
-			container := containerObj.(*ContainerInfo)
-			availableMemInBytes := atomic.LoadInt64(&(container.AvailableMemInBytes))
-			actualRequireMemory := atomic.LoadInt64(&(functionStatus.MeanMaxMemoryUsage))
-			if availableMemInBytes > actualRequireMemory {
-				res = container
-				break
-			}
-		}
-	}
-	if res == nil {
-		for _, key := range functionStatus.OtherContainerMap.Internal.Keys() {
-			containerObj, ok := functionStatus.ReservedContainerMap.Internal.Get(key)
-			if ok {
-				container := containerObj.(*ContainerInfo)
-				availableMemInBytes := atomic.LoadInt64(&(container.AvailableMemInBytes))
-				actualRequireMemory := atomic.LoadInt64(&(functionStatus.MeanMaxMemoryUsage))
-				if availableMemInBytes > actualRequireMemory {
-					res = container
-					break
-				}
-			}
-		}
-	}
-	if reservedNodeContainerBest != nil {
-		nodeObj, ok := r.nodeMap.Internal.Get(reservedNodeContainerBest.nodeId)
-		if ok {
-			node := nodeObj.(*NodeInfo)
-			node.requests.Set(requestId, 1)
-			// 减少该容器可使用内存
-			atomic.AddInt64(&(reservedNodeContainerBest.AvailableMemInBytes), -actualRequireMemory)
-			reservedNodeContainerBest.requests.Set(requestId, 1)
-			res = reservedNodeContainerBest
-		}
-	} else {
-		if allNodeContainerBest != nil {
-			nodeObj, ok := r.nodeMap.Internal.Get(allNodeContainerBest.nodeId)
-			if ok {
-				node := nodeObj.(*NodeInfo)
-				node.requests.Set(requestId, 1)
-				atomic.AddInt64(&(allNodeContainerBest.AvailableMemInBytes), -actualRequireMemory)
-				allNodeContainerBest.requests.Set(requestId, 1)
-				res = allNodeContainerBest
-			}
-		}
-	}
-	//containerMap.Unlock()
-	return res
-}
-
-// 取满足要求情况下，资源最少的节点，以达到紧密排布, 优先取保留节点
-func (r *Router) getAvailableNode(memoryReq int64, req *pb.AcquireContainerRequest) *NodeInfo {
-	var res *NodeInfo
-	//r.nodeMap.Lock()
-
-	nodeNum := atomic.LoadInt64(&nowReserveNodeNum)
-	for i := 1; i <= int(nodeNum); i++ {
-		nodeObj, ok := r.nodeMap.Internal.Get(string(i))
-		if ok {
-			nowNode := nodeObj.(*NodeInfo)
-			availableMemInBytes := atomic.LoadInt64(&(nowNode.availableMemInBytes))
-			if availableMemInBytes > memoryReq {
-				res = nowNode
-				// 根据创建的容器所需的内存减少当前节点的内存使用值, 先减，没创建成功再加回来
-				atomic.AddInt64(&(res.availableMemInBytes), -req.FunctionConfig.MemoryInBytes)
-				// 存入request id 防止被误删
-				res.requests.Set(req.RequestId, 1)
-				break
-			}
-		}
-	}
-	//r.nodeMap.Unlock()
-	return res
 }
