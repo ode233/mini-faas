@@ -18,7 +18,7 @@ type NodeInfo struct {
 	port                int64
 	availableMemInBytes int64
 
-	isReserved bool
+	reservedContainer cmap.ConcurrentMap // container_id -> status
 
 	// 一定存request而不是container，
 	//因为由于container的创建要等待，那么就无法立马存入container_id，可能导致正在创建container的节点被误认为没有使用，导致被误删。
@@ -38,7 +38,7 @@ func NewNode(nodeID, address string, port, memory int64) (*NodeInfo, error) {
 		address:             address,
 		port:                port,
 		availableMemInBytes: memory,
-		isReserved:          false,
+		reservedContainer:   cmap.New(),
 		requests:            cmap.New(),
 		conn:                conn,
 		NodeServiceClient:   pb.NewNodeServiceClient(conn),

@@ -2,7 +2,6 @@ package server
 
 import (
 	"aliyun/serverless/mini-faas/scheduler/utils/logger"
-	"encoding/json"
 	"sync"
 	"time"
 
@@ -11,7 +10,6 @@ import (
 	"google.golang.org/grpc/codes"
 
 	"aliyun/serverless/mini-faas/scheduler/core"
-	"aliyun/serverless/mini-faas/scheduler/model"
 	pb "aliyun/serverless/mini-faas/scheduler/proto"
 )
 
@@ -43,7 +41,8 @@ func (s *Server) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	reply, err := s.router.AcquireContainer(ctx, req)
 	latency := (time.Now().UnixNano() - now) / 1e6
 	if err != nil {
-		logger.Errorf("Failed to acquire due to %v, Latency: %d", err, latency)
+		logger.Errorf("request id: %s, function name: %s, Failed to acquire due to %v, Latency: %d",
+			req.RequestId, req.FunctionName, err, latency)
 		return nil, err
 	}
 	logger.Infof("request id: %s, AcquireContainer, Latency: %d", req.RequestId, latency)
@@ -55,12 +54,7 @@ func (s *Server) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 
 func (s *Server) ReturnContainer(ctx context.Context, req *pb.ReturnContainerRequest) (*pb.ReturnContainerReply, error) {
 	now := time.Now().UnixNano()
-	err := s.router.ReturnContainer(ctx, &model.ResponseInfo{
-		RequestID:             req.RequestId,
-		ContainerId:           req.ContainerId,
-		MaxMemoryUsageInBytes: req.MaxMemoryUsageInBytes,
-		DurationInNanos:       req.DurationInNanos / 1e6,
-	})
+	err := s.router.ReturnContainer(ctx, req)
 
 	latency := (time.Now().UnixNano() - now) / 1e6
 
@@ -68,17 +62,6 @@ func (s *Server) ReturnContainer(ctx context.Context, req *pb.ReturnContainerReq
 		logger.Errorf("Failed to return due to %v, Latency: %d", err, latency)
 		return nil, err
 	}
-	// 更新本次调用相关信息
-	requestStatusObj, _ := s.router.RequestMap.Get(req.RequestId)
-	requestStatus := requestStatusObj.(*core.RequestStatus)
-
-	requestStatus.ScheduleReturnContainerLatency = latency
-	requestStatus.ResponseTime = requestStatus.ScheduleAcquireContainerLatency + requestStatus.FunctionExecutionDuration
-	data, _ := json.MarshalIndent(requestStatus, "", "    ")
-	logger.Infof("\nrequest id: %s\n%s", req.RequestId, data)
-
-	logger.Infof("%s request finish, function name: %s", req.RequestId, requestStatus.FunctionName)
-	s.router.RequestMap.Remove(req.RequestId)
 
 	return &pb.ReturnContainerReply{}, nil
 }
