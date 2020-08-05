@@ -428,7 +428,18 @@ func (r *Router) getAvailableContainer(functionStatus *FunctionStatus, requestId
 		}
 	}
 	if res == nil {
-		ZZZZ
+		for _, key := range functionStatus.OtherContainerMap.Internal.Keys() {
+			containerObj, ok := functionStatus.ReservedContainerMap.Internal.Get(key)
+			if ok {
+				container := containerObj.(*ContainerInfo)
+				availableMemInBytes := atomic.LoadInt64(&(container.AvailableMemInBytes))
+				actualRequireMemory := atomic.LoadInt64(&(functionStatus.MeanMaxMemoryUsage))
+				if availableMemInBytes > actualRequireMemory {
+					res = container
+					break
+				}
+			}
+		}
 	}
 	if reservedNodeContainerBest != nil {
 		nodeObj, ok := r.nodeMap.Internal.Get(reservedNodeContainerBest.nodeId)

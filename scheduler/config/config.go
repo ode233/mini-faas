@@ -3,7 +3,8 @@ package config
 import "time"
 
 const (
-	MaxNodeNum = 10
+	MaxNodeNum     = 10
+	ReserveNodeNum = 5
 
 	// 隔多少次请求打印一次节点日志
 	LogPrintInterval = 20
