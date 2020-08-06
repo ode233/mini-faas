@@ -30,7 +30,7 @@ func processReturnContainer(res *model.ResponseInfo) {
 	}
 	requestStatus := rmObj.(*RequestStatus)
 	requestStatus.FunctionExecutionDuration = res.DurationInNanos
-	requestStatus.MaxMemoryUsage = res.MaxMemoryUsageInBytes * 4
+	requestStatus.MaxMemoryUsage = res.MaxMemoryUsageInBytes
 
 	functionStatus := requestStatus.functionStatus
 	container := requestStatus.containerInfo
