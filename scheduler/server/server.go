@@ -1,6 +1,7 @@
 package server
 
 import (
+	"aliyun/serverless/mini-faas/scheduler/model"
 	"aliyun/serverless/mini-faas/scheduler/utils/logger"
 	"sync"
 	"time"
@@ -54,7 +55,12 @@ func (s *Server) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 
 func (s *Server) ReturnContainer(ctx context.Context, req *pb.ReturnContainerRequest) (*pb.ReturnContainerReply, error) {
 	now := time.Now().UnixNano()
-	err := s.router.ReturnContainer(ctx, req)
+	err := s.router.ReturnContainer(ctx, &model.ResponseInfo{
+		RequestID:             req.RequestId,
+		ContainerId:           req.ContainerId,
+		MaxMemoryUsageInBytes: req.MaxMemoryUsageInBytes,
+		DurationInNanos:       req.DurationInNanos / 1e6,
+	})
 
 	latency := (time.Now().UnixNano() - now) / 1e6
 

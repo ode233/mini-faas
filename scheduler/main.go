@@ -108,6 +108,8 @@ func main() {
 
 	go svr.Serve(lis)
 
+	go core.Process(router)
+
 	select {
 	case <-ctx.Done():
 		logger.Infof("Scheduler gRPC server gracefully stopping ...")

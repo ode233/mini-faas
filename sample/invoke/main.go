@@ -55,11 +55,11 @@ func main() {
 	data, _ := json.MarshalIndent(lfReply.Functions, "", "    ")
 	logger.Infof("lfReply.Functions:\n%s", data)
 
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 200; i++ {
 		for _, f := range lfReply.Functions {
 			e := sampleEvents[f.FunctionName]
 			event := fmt.Sprintf(`{"functionName": "%s", "param": "%s"}`, f.FunctionName, e)
-			for j := 0; j < 5; j++ {
+			for j := 0; j < 10; j++ {
 				//invokeFunction(asClient, f.FunctionName, []byte(event))
 				go invokeFunction(asClient, f.FunctionName, []byte(event))
 				wg.Add(1)
@@ -75,6 +75,7 @@ func main() {
 func invokeFunction(asClient pb.APIServerClient, functionName string, event []byte) {
 	defer wg.Done()
 	logger.Infof("Invoking function %s with event %s\n", functionName, string(event))
+	now := time.Now().UnixNano()
 	// 本地30s测2500次会有大概100多次超时，调高一些
 	ctxAc, cancelAc := context.WithTimeout(context.Background(), 60*time.Second)
 	invkReply, err := asClient.InvokeFunction(ctxAc, &pb.InvokeFunctionRequest{
@@ -83,14 +84,15 @@ func invokeFunction(asClient pb.APIServerClient, functionName string, event []by
 		Event:        event,
 	})
 	cancelAc()
+	latency := (time.Now().UnixNano() - now) / 1e6
 	if err != nil {
 		requestId := ""
 		if invkReply != nil {
 			requestId = invkReply.RequestId
 		}
-		logger.Infof("request id: %s, Failed to invoke function %s due to %+v\n", requestId, functionName, err)
+		logger.Infof("request id: %s, Failed to invoke function %s due to %+v, latency: %d\n", requestId, functionName, err, latency)
 		return
 	}
 
-	logger.Infof("request id: %s, Invoke function reply %+v\n", invkReply.RequestId, invkReply)
+	logger.Infof("request id: %s, Invoke function reply %+v, latency: %d\n", invkReply.RequestId, invkReply, latency)
 }
