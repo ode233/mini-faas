@@ -106,9 +106,9 @@ func main() {
 		return
 	}
 
-	go svr.Serve(lis)
-
 	go core.Process(router)
+
+	go svr.Serve(lis)
 
 	select {
 	case <-ctx.Done():

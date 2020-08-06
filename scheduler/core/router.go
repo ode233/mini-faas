@@ -48,8 +48,7 @@ type FunctionStatus struct {
 	RequireMemory            int64
 	MeanMaxMemoryUsage       int64
 	ReturnContainerChan      chan *ContainerInfo
-	ReservedContainerMap     *LockMap
-	OtherContainerMap        *LockMap // container_id -> ContainerInfo
+	NodeContainerMap         cmap.ConcurrentMap // nodeNo -> ContainerMap
 }
 
 type ContainerInfo struct {
@@ -58,6 +57,7 @@ type ContainerInfo struct {
 	AvailableMemInBytes int64
 	isReserved          bool
 	containerNo         string
+	sendTime            int32
 	// 用ConcurrentMap读写锁可能会导致删除容器时重复删除
 	requests cmap.ConcurrentMap // request_id -> status
 }
@@ -104,13 +104,8 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		IsFirstRound:        true,
 		RequireMemory:       req.FunctionConfig.MemoryInBytes,
 		MeanMaxMemoryUsage:  0,
-		ReturnContainerChan: make(chan *ContainerInfo, 100),
-		ReservedContainerMap: &LockMap{
-			Internal: cmap.New(),
-		},
-		OtherContainerMap: &LockMap{
-			Internal: cmap.New(),
-		},
+		ReturnContainerChan: make(chan *ContainerInfo, 1000),
+		NodeContainerMap:    cmap.New(),
 	})
 	fmObj, _ := r.functionMap.Get(req.FunctionName)
 	functionStatus := fmObj.(*FunctionStatus)
@@ -127,54 +122,48 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		waitContainerErr = errors.Wrapf(err, "fail to createNewContainer")
 	} else {
 		actualRequireMemory = functionStatus.MeanMaxMemoryUsage
+		timeout := time.NewTimer(cp.ChannelTimeout)
+		select {
+		case res = <-functionStatus.ReturnContainerChan:
+			res.requests.Set(req.RequestId, 1)
+			atomic.AddInt32(&(res.sendTime), -1)
+			logger.Infof("res id: %s, use exist container", req.RequestId)
+			break
+		case <-timeout.C:
+			waitContainerErr = errors.New("ReturnContainerChan timeout")
+		}
+	}
+
+	if res == nil {
+		logger.Warningf("wait reason %v", waitContainerErr)
 		now := time.Now().UnixNano()
-		for container := range functionStatus.ReturnContainerChan {
-			if container.isReserved {
-				res = container
+		var s string
+		for {
+			timeout := time.NewTimer(cp.Timout)
+			select {
+			case res = <-functionStatus.ReturnContainerChan:
+				res.requests.Set(req.RequestId, 1)
+				atomic.AddInt32(&(res.sendTime), -1)
+				s = "use exist container"
 				break
-			} else {
-				_, ok := functionStatus.OtherContainerMap.Internal.Get(container.containerNo)
-				if ok {
-					res = container
+			case <-timeout.C:
+				res, _ = r.createNewContainer(req, functionStatus)
+				if res != nil {
+					s = "createNewContainer"
 					break
 				}
 			}
 			latency := time.Now().UnixNano() - now
-			if latency >= cp.ChannelTimeout.Nanoseconds() {
-				waitContainerErr = errors.New("wait ReturnContainerChan timeout")
+			if res != nil {
+				logger.Infof("res id: %s, %s second, latency: %d", req.RequestId, s, latency/1e6)
 				break
-			}
-		}
-	}
-
-	// 获取使用的容器信息
-	if res == nil { // 等待空闲容器
-		logger.Warningf("reason: %v", waitContainerErr)
-		var err error
-		res, err = r.createNewContainer(req, functionStatus)
-		if res == nil {
-			now := time.Now().UnixNano()
-			for container := range functionStatus.ReturnContainerChan {
-				if container.isReserved {
-					res = container
-					break
-				} else {
-					_, ok := functionStatus.OtherContainerMap.Internal.Get(container.containerNo)
-					if ok {
-						res = container
-						break
-					}
-				}
-				latency := time.Now().UnixNano() - now
-				if latency >= cp.WaitChannelTimeout.Nanoseconds() {
-					waitContainerErr = errors.New("wait ReturnContainerChan timeout")
-					return nil, err
+			} else {
+				if latency > cp.WaitChannelTimeout.Nanoseconds() {
+					return nil, waitContainerErr
 				}
 			}
 		}
 	}
-
-	res.requests.Set(req.RequestId, 1)
 
 	requestStatus := &RequestStatus{
 		FunctionName:        req.FunctionName,
@@ -231,7 +220,14 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 			createContainerErr = errors.Wrapf(err, "failed to create container on %s", node.address)
 		} else {
 			actualRequireMemory := atomic.LoadInt64(&(functionStatus.MeanMaxMemoryUsage))
-			containerNo := string(atomic.AddInt64(&(functionStatus.OtherContainerMap.num), 1))
+
+			functionStatus.NodeContainerMap.SetIfAbsent(node.nodeNo, &LockMap{
+				num:      0,
+				Internal: cmap.New(),
+			})
+			nodeContainerMapObj, _ := functionStatus.NodeContainerMap.Get(node.nodeNo)
+			nodeContainerMap := nodeContainerMapObj.(*LockMap)
+			containerNo := string(atomic.AddInt64(&(nodeContainerMap.num), 1))
 			res = &ContainerInfo{
 				ContainerId:         replyC.ContainerId,
 				nodeInfo:            node,
@@ -241,8 +237,8 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 				requests:            cmap.New(),
 			}
 			// 新键的容器还没添加进containerMap所以不用锁
-			//res.requests.Set(req.RequestId, 1)
-			functionStatus.OtherContainerMap.Internal.Set(containerNo, res)
+			res.requests.Set(req.RequestId, 1)
+			nodeContainerMap.Internal.Set(containerNo, res)
 			logger.Infof("request id: %s, create container", req.RequestId)
 		}
 	}
@@ -267,7 +263,7 @@ func (r *Router) getNode(accountId string, memoryReq int64, req *pb.AcquireConta
 		}
 
 		// 超时没有请求到节点就取消
-		ctxR, cancelR := context.WithTimeout(context.Background(), 30*time.Second)
+		ctxR, cancelR := context.WithTimeout(context.Background(), cp.Timout)
 		defer cancelR()
 		now := time.Now().UnixNano()
 		replyRn, err := r.rmClient.ReserveNode(ctxR, &rmPb.ReserveNodeRequest{
