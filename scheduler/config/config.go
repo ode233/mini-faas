@@ -6,7 +6,7 @@ const (
 	MaxNodeNum     = 10
 	ReserveNodeNum = 5
 
-	ReserveContainerNumRadio   = 1.5
+	ReserveContainerNumRadio   = 2
 	ReserveContainerCacheRadio = 0.2
 
 	// 隔多少次请求打印一次节点日志

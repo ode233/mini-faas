@@ -4,7 +4,6 @@ import (
 	"aliyun/serverless/mini-faas/scheduler/model"
 	"aliyun/serverless/mini-faas/scheduler/utils/logger"
 	"context"
-	"encoding/json"
 	uuid "github.com/satori/go.uuid"
 	"sync"
 	"sync/atomic"
@@ -128,16 +127,23 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		waitContainerErr = errors.Wrapf(err, "fail to createNewContainer")
 	} else {
 		actualRequireMemory = functionStatus.MeanMaxMemoryUsage
-		timeout := time.NewTimer(cp.ChannelTimeout)
 		now := time.Now().UnixNano()
-		select {
-		case container := <-functionStatus.ReturnContainerChan:
-			latency := (time.Now().UnixNano() - now) / 1e6
-			logger.Infof("request id: %s, wait %d to use available container", req.RequestId, latency/1e6)
-			res = container
-			break
-		case <-timeout.C:
-			break
+		for container := range functionStatus.ReturnContainerChan {
+			if container.isReserved {
+				res = container
+				break
+			} else {
+				_, ok := functionStatus.OtherContainerMap.Internal.Get(container.containerNo)
+				if ok {
+					res = container
+					break
+				}
+			}
+			latency := time.Now().UnixNano() - now
+			if latency >= cp.ChannelTimeout.Nanoseconds() {
+				waitContainerErr = errors.New("wait ReturnContainerChan timeout")
+				break
+			}
 		}
 	}
 
@@ -147,19 +153,28 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		var err error
 		res, err = r.createNewContainer(req, functionStatus)
 		if res == nil {
-			timeout := time.NewTimer(cp.WaitChannelTimeout)
 			now := time.Now().UnixNano()
-			select {
-			case container := <-functionStatus.ReturnContainerChan:
-				latency := (time.Now().UnixNano() - now) / 1e6
-				logger.Infof("request id: %s, second wait %d to use available container", req.RequestId, latency/1e6)
-				res = container
-				break
-			case <-timeout.C:
-				return nil, err
+			for container := range functionStatus.ReturnContainerChan {
+				if container.isReserved {
+					res = container
+					break
+				} else {
+					_, ok := functionStatus.OtherContainerMap.Internal.Get(container.containerNo)
+					if ok {
+						res = container
+						break
+					}
+				}
+				latency := time.Now().UnixNano() - now
+				if latency >= cp.WaitChannelTimeout.Nanoseconds() {
+					waitContainerErr = errors.New("wait ReturnContainerChan timeout")
+					return nil, err
+				}
 			}
 		}
 	}
+
+	res.requests.Set(req.RequestId, 1)
 
 	requestStatus := &RequestStatus{
 		FunctionName:        req.FunctionName,
@@ -226,7 +241,7 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 				requests:            cmap.New(),
 			}
 			// 新键的容器还没添加进containerMap所以不用锁
-			res.requests.Set(req.RequestId, 1)
+			//res.requests.Set(req.RequestId, 1)
 			functionStatus.OtherContainerMap.Internal.Set(containerNo, res)
 			logger.Infof("request id: %s, create container", req.RequestId)
 		}
@@ -274,16 +289,14 @@ func (r *Router) getNode(accountId string, memoryReq int64, req *pb.AcquireConta
 		}
 
 		//用node.GetStats重置可用内存
-		nodeGS, _ := node.GetStats(context.Background(), &nsPb.GetStatsRequest{})
-		node.availableMemInBytes = nodeGS.NodeStats.AvailableMemoryInBytes
+		//nodeGS, _ := node.GetStats(context.Background(), &nsPb.GetStatsRequest{})
+		//node.availableMemInBytes = nodeGS.NodeStats.AvailableMemoryInBytes
 
 		// 不加锁可能出现两个先写，之后读的时候本来有一个是可以保留的，但是读的是都是最新值导致都没法保留
 		//r.nodeMap.Lock()
 		atomic.AddInt64(&(node.availableMemInBytes), -req.FunctionConfig.MemoryInBytes)
 		node.requests.Set(req.RequestId, 1)
 		r.nodeMap.Internal.Set(nodeNo, node)
-		data, _ := json.MarshalIndent(r.nodeMap.Internal, "", "    ")
-		logger.Infof("node map %s", data)
 		logger.Infof("ReserveNode id: %s", nodeDesc.Id)
 		//r.nodeMap.Unlock()
 

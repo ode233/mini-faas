@@ -64,6 +64,10 @@ func (s *Server) ReturnContainer(ctx context.Context, req *pb.ReturnContainerReq
 
 	latency := (time.Now().UnixNano() - now) / 1e6
 
+	if req.ErrorMessage != "" {
+		logger.Errorf("request id: %s, ReturnContainerRequest error: %s", req.RequestId, req.ErrorMessage)
+	}
+
 	if err != nil {
 		logger.Errorf("Failed to return due to %v, Latency: %d", err, latency)
 		return nil, err

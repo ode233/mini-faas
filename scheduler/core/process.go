@@ -30,7 +30,7 @@ func processReturnContainer(res *model.ResponseInfo) {
 	}
 	requestStatus := rmObj.(*RequestStatus)
 	requestStatus.FunctionExecutionDuration = res.DurationInNanos
-	requestStatus.MaxMemoryUsage = res.MaxMemoryUsageInBytes
+	requestStatus.MaxMemoryUsage = res.MaxMemoryUsageInBytes * 4
 
 	functionStatus := requestStatus.functionStatus
 	container := requestStatus.containerInfo
@@ -42,8 +42,8 @@ func processReturnContainer(res *model.ResponseInfo) {
 		functionStatus.FunctionNumPerContainer = int(functionStatus.RequireMemory / res.MaxMemoryUsageInBytes)
 		functionStatus.MeanMaxMemoryUsage = res.MaxMemoryUsageInBytes
 		functionStatus.IsFirstRound = false
-		logger.Infof("NeedReservedContainerNum: %d, FunctionNumPerContainer: %d ",
-			functionStatus.NeedReservedContainerNum, functionStatus.FunctionNumPerContainer)
+		logger.Infof("NeedReservedContainerNum: %d, FunctionNumPerContainer: %d, FirstRoundRequestNum: %d, MeanMaxMemoryUsage: %d  ",
+			functionStatus.NeedReservedContainerNum, functionStatus.FunctionNumPerContainer, firstRoundRequestNum, res.MaxMemoryUsageInBytes)
 	}
 
 	container.requests.Remove(res.RequestID)
@@ -70,13 +70,14 @@ func processReturnContainer(res *model.ResponseInfo) {
 		}
 	}
 
+	// todo 尽量使用reserved container
 	if container.isReserved {
 		functionStatus.ReturnContainerChan <- container
 	} else {
-		reserveContainerCache := int(math.Ceil(float64(functionStatus.NeedReservedContainerNum) * cp.ReserveContainerCacheRadio))
+		reserveContainerCache := int(math.Ceil(float64(functionStatus.NeedReservedContainerNum*int32(functionStatus.FunctionNumPerContainer)) * cp.ReserveContainerCacheRadio))
 		if len(functionStatus.ReturnContainerChan) < reserveContainerCache {
 			if requestStatus.isFirstRound {
-				for i := 0; i < functionStatus.FunctionNumPerContainer; i++ {
+				for i := 0; i < (functionStatus.FunctionNumPerContainer); i++ {
 					functionStatus.ReturnContainerChan <- container
 				}
 			} else {
@@ -99,6 +100,14 @@ func processReturnContainer(res *model.ResponseInfo) {
 					logger.Infof("ReleaseNode")
 				} else {
 					atomic.AddInt64(&(nodeInfo.availableMemInBytes), functionStatus.RequireMemory)
+				}
+			} else {
+				if requestStatus.isFirstRound {
+					for i := 0; i < functionStatus.FunctionNumPerContainer; i++ {
+						functionStatus.ReturnContainerChan <- container
+					}
+				} else {
+					functionStatus.ReturnContainerChan <- container
 				}
 			}
 		}
