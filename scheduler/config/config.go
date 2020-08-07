@@ -6,6 +6,8 @@ const (
 	MaxNodeNum     = 10
 	ReserveNodeNum = 5
 
+	MemoryPerCpu = 1 * 1024 * 1024 * 1024 / 0.67
+
 	ReserveContainerNumRadio   = 2
 	ReserveContainerCacheRadio = 0.2
 
