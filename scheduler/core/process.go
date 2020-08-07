@@ -90,11 +90,14 @@ func processReturnContainer(res *model.ResponseInfo) {
 	if functionStatus.IsFirstRound {
 		functionStatus.IsFirstRound = false
 		logger.Infof("FirstRoundRequestNum: %d", functionStatus.FirstRoundRequestNum)
+		nodeGS, _ := nodeInfo.GetStats(context.Background(), &nsPb.GetStatsRequest{})
+		data, _ := json.MarshalIndent(nodeGS, "", "    ")
+		logger.Infof("GetStatsRequest:\n%s", data)
 	}
 
-	if functionStatus.MeanMaxMemoryUsage < res.MaxMemoryUsageInBytes {
-		functionStatus.MeanMaxMemoryUsage = res.MaxMemoryUsageInBytes
-	}
+	//if functionStatus.ComputeRequireMemory < res.MaxMemoryUsageInBytes {
+	//	functionStatus.ComputeRequireMemory = res.MaxMemoryUsageInBytes
+	//}
 
 	container.requests.Remove(res.RequestID)
 	nodeInfo.requests.Remove(res.RequestID)
@@ -130,7 +133,7 @@ func processReturnContainer(res *model.ResponseInfo) {
 func sendContainer(functionStatus *FunctionStatus) {
 	needReservedNum := int(functionStatus.FirstRoundRequestNum) - len(functionStatus.ReturnContainerChan)
 	logger.Infof("needReservedNum: %d", needReservedNum)
-	meanMaxMemoryUsage := atomic.LoadInt64(&(functionStatus.MeanMaxMemoryUsage))
+	computeRequireMemory := atomic.LoadInt64(&(functionStatus.ComputeRequireMemory))
 	if needReservedNum > 0 {
 		for i := 1; i <= int(r.nodeMap.num); i++ {
 			containerMapObj, ok := functionStatus.NodeContainerMap.Get(string(i))
@@ -142,12 +145,12 @@ func sendContainer(functionStatus *FunctionStatus) {
 					if ok {
 						logger.Infof("container no: %d", j)
 						nowContainer := nowContainerObj.(*ContainerInfo)
-						if nowContainer.AvailableMemInBytes > meanMaxMemoryUsage {
-							num := nowContainer.AvailableMemInBytes / meanMaxMemoryUsage
+						if nowContainer.AvailableMemInBytes >= computeRequireMemory {
+							num := nowContainer.AvailableMemInBytes / computeRequireMemory
 							for i := 0; i < int(num); i++ {
 								logger.Infof("sendContainer")
 								functionStatus.ReturnContainerChan <- nowContainer
-								atomic.AddInt64(&(nowContainer.AvailableMemInBytes), -meanMaxMemoryUsage)
+								atomic.AddInt64(&(nowContainer.AvailableMemInBytes), -computeRequireMemory)
 								needReservedNum -= 1
 								atomic.AddInt32(&(nowContainer.sendTime), 1)
 								if needReservedNum < 1 {

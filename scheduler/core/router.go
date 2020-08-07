@@ -46,7 +46,7 @@ type FunctionStatus struct {
 	FunctionNumPerContainer  int
 	NowReservedContainerNum  int32
 	RequireMemory            int64
-	MeanMaxMemoryUsage       int64
+	ComputeRequireMemory     int64
 	ReturnContainerChan      chan *ContainerInfo
 	NodeContainerMap         cmap.ConcurrentMap // nodeNo -> ContainerMap
 }
@@ -101,11 +101,12 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 
 	// 取该函数相关信息
 	r.functionMap.SetIfAbsent(req.FunctionName, &FunctionStatus{
-		IsFirstRound:        true,
-		RequireMemory:       req.FunctionConfig.MemoryInBytes,
-		MeanMaxMemoryUsage:  0,
-		ReturnContainerChan: make(chan *ContainerInfo, 1000),
-		NodeContainerMap:    cmap.New(),
+		IsFirstRound:  true,
+		RequireMemory: req.FunctionConfig.MemoryInBytes,
+		//ComputeRequireMemory:  0,
+		ComputeRequireMemory: req.FunctionConfig.MemoryInBytes,
+		ReturnContainerChan:  make(chan *ContainerInfo, 1000),
+		NodeContainerMap:     cmap.New(),
 	})
 	fmObj, _ := r.functionMap.Get(req.FunctionName)
 	functionStatus := fmObj.(*FunctionStatus)
@@ -118,10 +119,10 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		actualRequireMemory = functionStatus.RequireMemory
 		atomic.AddInt64(&(functionStatus.FirstRoundRequestNum), 1)
 		var err error
-		res, err = r.createNewContainer(req, functionStatus)
+		res, err = r.createNewContainer(req, functionStatus, actualRequireMemory)
 		waitContainerErr = errors.Wrapf(err, "fail to createNewContainer")
 	} else {
-		actualRequireMemory = functionStatus.MeanMaxMemoryUsage
+		actualRequireMemory = functionStatus.ComputeRequireMemory
 		timeout := time.NewTimer(cp.ChannelTimeout)
 		select {
 		case res = <-functionStatus.ReturnContainerChan:
@@ -147,7 +148,7 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 				s = "use exist container"
 				break
 			case <-timeout.C:
-				res, _ = r.createNewContainer(req, functionStatus)
+				res, _ = r.createNewContainer(req, functionStatus, actualRequireMemory)
 				if res != nil {
 					s = "createNewContainer"
 					break
@@ -189,12 +190,12 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	}, nil
 }
 
-func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionStatus *FunctionStatus) (*ContainerInfo, error) {
+func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionStatus *FunctionStatus, actualRequireMemory int64) (*ContainerInfo, error) {
 	var res *ContainerInfo
 	createContainerErr := errors.Errorf("")
 	// 获取一个node，有满足容器内存要求的node直接返回该node，否则申请一个新的node返回
 	// 容器大小取多少？
-	node, err := r.getNode(req.AccountId, req.FunctionConfig.MemoryInBytes, req)
+	node, err := r.getNode(actualRequireMemory, req)
 	if err != nil {
 		createContainerErr = err
 	} else {
@@ -214,13 +215,11 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 		})
 		logger.Infof("CreateContainer, Latency: %d", (time.Now().UnixNano()-now)/1e6)
 		if err != nil {
-			atomic.AddInt64(&(node.availableMemInBytes), req.FunctionConfig.MemoryInBytes)
+			atomic.AddInt64(&(node.availableMemInBytes), actualRequireMemory)
 			// 没有创建成功则删除
 			node.requests.Remove(req.RequestId)
 			createContainerErr = errors.Wrapf(err, "failed to create container on %s", node.address)
 		} else {
-			actualRequireMemory := atomic.LoadInt64(&(functionStatus.MeanMaxMemoryUsage))
-
 			functionStatus.NodeContainerMap.SetIfAbsent(node.nodeNo, &LockMap{
 				num:      0,
 				Internal: cmap.New(),
@@ -245,10 +244,10 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 	return res, createContainerErr
 }
 
-func (r *Router) getNode(accountId string, memoryReq int64, req *pb.AcquireContainerRequest) (*NodeInfo, error) {
+func (r *Router) getNode(actualRequireMemory int64, req *pb.AcquireContainerRequest) (*NodeInfo, error) {
 	var node *NodeInfo
 
-	node = r.getAvailableNode(memoryReq, req)
+	node = r.getAvailableNode(actualRequireMemory, req)
 
 	if node != nil {
 		logger.Infof("rq id: %s, get exist node: %s", req.RequestId, node.nodeID)
@@ -266,9 +265,7 @@ func (r *Router) getNode(accountId string, memoryReq int64, req *pb.AcquireConta
 		ctxR, cancelR := context.WithTimeout(context.Background(), cp.Timout)
 		defer cancelR()
 		now := time.Now().UnixNano()
-		replyRn, err := r.rmClient.ReserveNode(ctxR, &rmPb.ReserveNodeRequest{
-			AccountId: accountId,
-		})
+		replyRn, err := r.rmClient.ReserveNode(ctxR, &rmPb.ReserveNodeRequest{})
 		latency := (time.Now().UnixNano() - now) / 1e6
 		if err != nil {
 			return nil, errors.Errorf("Failed to reserve node due to %v, Latency: %d", err, latency)
@@ -290,7 +287,7 @@ func (r *Router) getNode(accountId string, memoryReq int64, req *pb.AcquireConta
 
 		// 不加锁可能出现两个先写，之后读的时候本来有一个是可以保留的，但是读的是都是最新值导致都没法保留
 		//r.nodeMap.Lock()
-		atomic.AddInt64(&(node.availableMemInBytes), -req.FunctionConfig.MemoryInBytes)
+		atomic.AddInt64(&(node.availableMemInBytes), -actualRequireMemory)
 		node.requests.Set(req.RequestId, 1)
 		r.nodeMap.Internal.Set(nodeNo, node)
 		logger.Infof("ReserveNode id: %s", nodeDesc.Id)
@@ -302,7 +299,7 @@ func (r *Router) getNode(accountId string, memoryReq int64, req *pb.AcquireConta
 }
 
 // 取满足要求情况下，资源最少的节点，以达到紧密排布, 优先取保留节点
-func (r *Router) getAvailableNode(memoryReq int64, req *pb.AcquireContainerRequest) *NodeInfo {
+func (r *Router) getAvailableNode(actualRequireMemory int64, req *pb.AcquireContainerRequest) *NodeInfo {
 	var res *NodeInfo
 	//r.nodeMap.Lock()
 
@@ -312,10 +309,10 @@ func (r *Router) getAvailableNode(memoryReq int64, req *pb.AcquireContainerReque
 		if ok {
 			nowNode := nodeObj.(*NodeInfo)
 			availableMemInBytes := atomic.LoadInt64(&(nowNode.availableMemInBytes))
-			if availableMemInBytes > memoryReq {
+			if availableMemInBytes > actualRequireMemory {
 				res = nowNode
 				// 根据创建的容器所需的内存减少当前节点的内存使用值, 先减，没创建成功再加回来
-				atomic.AddInt64(&(res.availableMemInBytes), -req.FunctionConfig.MemoryInBytes)
+				atomic.AddInt64(&(res.availableMemInBytes), -actualRequireMemory)
 				// 存入request id 防止被误删
 				res.requests.Set(req.RequestId, 1)
 				break
