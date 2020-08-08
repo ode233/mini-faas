@@ -91,18 +91,19 @@ func processReturnContainer(res *model.ResponseInfo) {
 	container := requestStatus.containerInfo
 	nodeInfo := container.nodeInfo
 
-	if res.MaxMemoryUsageInBytes > atomic.LoadInt64(&(functionStatus.ComputeRequireMemory)) {
-		atomic.StoreInt64(&(functionStatus.ComputeRequireMemory), res.MaxMemoryUsageInBytes)
+	if res.MaxMemoryUsageInBytes > functionStatus.ComputeRequireMemory {
+		functionStatus.ComputeRequireMemory = res.MaxMemoryUsageInBytes
 	}
 
 	atomic.AddInt64(&(container.AvailableMemInBytes), requestStatus.ActualRequireMemory)
-	sendContainer(functionStatus)
+	sendContainer(functionStatus, functionStatus.ComputeRequireMemory)
+
+	containerMapObj, _ := functionStatus.NodeContainerMap.Get(nodeInfo.nodeNo)
+	containerMap := containerMapObj.(*LockMap)
 
 	container.requests.Remove(res.RequestID)
 	nodeInfo.requests.Remove(res.RequestID)
 
-	containerMapObj, _ := functionStatus.NodeContainerMap.Get(nodeInfo.nodeNo)
-	containerMap := containerMapObj.(*LockMap)
 	containerMap.Lock()
 	if container.requests.Count() < 1 && atomic.LoadInt32(&(container.sendTime)) < 1 {
 		containerMap.Internal.Remove(container.containerNo)
@@ -115,6 +116,7 @@ func processReturnContainer(res *model.ResponseInfo) {
 		logger.Infof("%s RemoveContainer", functionStatus.FunctionName)
 	}
 	containerMap.Unlock()
+
 	r.nodeMap.Lock()
 	if nodeInfo.requests.Count() < 1 && nodeInfo.containers.Count() < 1 {
 		r.nodeMap.Internal.Remove(nodeInfo.nodeNo)
@@ -128,28 +130,12 @@ func processReturnContainer(res *model.ResponseInfo) {
 
 }
 
-func sendContainer(functionStatus *FunctionStatus) {
-	nodeNum := atomic.LoadInt32(&(r.nodeMap.num))
-	for i := 1; i <= int(nodeNum); i++ {
-		containerMapObj, ok := functionStatus.NodeContainerMap.Get(strconv.Itoa(i))
-		if ok {
-			containerMap := containerMapObj.(*LockMap)
-			containerNum := atomic.LoadInt32(&(containerMap.num))
-			for j := 1; j <= int(containerNum); j++ {
-				containerMap.Lock()
-				nowContainerObj, ok := containerMap.Internal.Get(strconv.Itoa(j))
-				if ok {
-					nowContainer := nowContainerObj.(*ContainerInfo)
-					computeRequireMemory := atomic.LoadInt64(&(functionStatus.ComputeRequireMemory))
-					if atomic.LoadInt64(&(nowContainer.AvailableMemInBytes)) >= computeRequireMemory {
-						functionStatus.SendContainerChan <- nowContainer
-						atomic.AddInt32(&(nowContainer.sendTime), 1)
-						containerMap.Unlock()
-						return
-					}
-				}
-				containerMap.Unlock()
-			}
+func sendContainer(functionStatus *FunctionStatus, computeRequireMemory int64) {
+	for i := 0; i < cp.SendContainerRatio; i++ {
+		container := r.getAvailableContainer(functionStatus, computeRequireMemory)
+		if container != nil {
+			functionStatus.SendContainerChan <- container
+			atomic.AddInt32(&(container.sendTime), 1)
 		}
 	}
 }

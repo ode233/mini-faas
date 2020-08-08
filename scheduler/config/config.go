@@ -9,7 +9,7 @@ const (
 	MemoryPerCpu = 1 * 1024 * 1024 * 1024 / 0.67
 
 	ComputeMemoryRatio = 2
-	SendContainerRatio = 10
+	SendContainerRatio = 2
 
 	ReserveMemory = 32 * 1024 * 1024
 
