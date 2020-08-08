@@ -134,6 +134,7 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		select {
 		case sendContainerStruct := <-functionStatus.SendContainerChan:
 			res = sendContainerStruct.container
+			atomic.AddInt32(&(res.sendTime), -1)
 			actualRequireMemory = sendContainerStruct.memory
 			logger.Infof("res id: %s, use exist container", req.RequestId)
 			break
@@ -144,7 +145,8 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 
 	if res == nil {
 		var err error
-		atomic.AddInt32(&(functionStatus.NeedCacheRequestNum), 1)
+		atomic.AddInt32(&(functionStatus.NeedCacheRequestNum), 1*cp.SendContainerRatio)
+		logger.Infof("%s, NeedCacheRequestNum: %d", req.FunctionName, functionStatus.NeedCacheRequestNum)
 		res, err = r.createNewContainer(req, functionStatus, actualRequireMemory)
 		if res == nil {
 			logger.Warningf("wait reason: %v", err)
@@ -153,6 +155,7 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 			select {
 			case sendContainerStruct := <-functionStatus.SendContainerChan:
 				res = sendContainerStruct.container
+				atomic.AddInt32(&(res.sendTime), -1)
 				actualRequireMemory = sendContainerStruct.memory
 				logger.Warningf("second wait latency %d ", (time.Now().UnixNano()-now)/1e6)
 				break
@@ -164,7 +167,6 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 
 	res.requests.Set(req.RequestId, 1)
 	atomic.AddInt64(&(res.AvailableMemInBytes), -actualRequireMemory)
-	atomic.AddInt32(&(res.sendTime), -1)
 
 	requestStatus := &RequestStatus{
 		FunctionName:        req.FunctionName,
@@ -191,7 +193,6 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 
 func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionStatus *FunctionStatus, actualRequireMemory int64) (*ContainerInfo, error) {
 	var res *ContainerInfo
-	logger.Infof("%s, NeedCacheRequestNum: %d", req.FunctionName, functionStatus.NeedCacheRequestNum)
 	createContainerErr := errors.Errorf("")
 	// 获取一个node，有满足容器内存要求的node直接返回该node，否则申请一个新的node返回
 	// 容器大小取多少？

@@ -116,28 +116,28 @@ func processReturnContainer(res *model.ResponseInfo) {
 	container.requests.Remove(res.RequestID)
 	nodeInfo.requests.Remove(res.RequestID)
 
-	//containerMapObj, _ := functionStatus.NodeContainerMap.Get(nodeInfo.nodeNo)
-	//containerMap := containerMapObj.(*LockMap)
-	//container.Lock()
-	//if container.requests.Count() < 1 && atomic.LoadInt32(&(container.sendTime)) < 1 {
-	//	containerMap.Internal.Remove(container.containerNo)
-	//	nodeInfo.containers.Remove(res.ContainerId)
-	//	atomic.AddInt64(&(nodeInfo.availableMemInBytes), requestStatus.RequireMemory)
-	//	go nodeInfo.RemoveContainer(context.Background(), &nsPb.RemoveContainerRequest{
-	//		RequestId:   res.RequestID,
-	//		ContainerId: container.ContainerId,
-	//	})
-	//	logger.Infof("%s RemoveContainer", functionStatus.FunctionName)
-	//}
-	//container.Unlock()
-	//if nodeInfo.requests.Count() < 1 && nodeInfo.containers.Count() < 1 {
-	//	r.nodeMap.Internal.Remove(nodeInfo.nodeNo)
-	//	go r.rmClient.ReleaseNode(context.Background(), &rmPb.ReleaseNodeRequest{
-	//		RequestId: res.RequestID,
-	//		Id:        nodeInfo.nodeID,
-	//	})
-	//	logger.Infof("%s ReleaseNode", functionStatus.FunctionName)
-	//}
+	containerMapObj, _ := functionStatus.NodeContainerMap.Get(nodeInfo.nodeNo)
+	containerMap := containerMapObj.(*LockMap)
+	container.Lock()
+	if container.requests.Count() < 1 && atomic.LoadInt32(&(container.sendTime)) < 1 {
+		containerMap.Internal.Remove(container.containerNo)
+		nodeInfo.containers.Remove(res.ContainerId)
+		atomic.AddInt64(&(nodeInfo.availableMemInBytes), requestStatus.RequireMemory)
+		go nodeInfo.RemoveContainer(context.Background(), &nsPb.RemoveContainerRequest{
+			RequestId:   res.RequestID,
+			ContainerId: container.ContainerId,
+		})
+		logger.Infof("%s RemoveContainer", functionStatus.FunctionName)
+	}
+	container.Unlock()
+	if nodeInfo.requests.Count() < 1 && nodeInfo.containers.Count() < 1 {
+		r.nodeMap.Internal.Remove(nodeInfo.nodeNo)
+		go r.rmClient.ReleaseNode(context.Background(), &rmPb.ReleaseNodeRequest{
+			RequestId: res.RequestID,
+			Id:        nodeInfo.nodeID,
+		})
+		logger.Infof("%s ReleaseNode", functionStatus.FunctionName)
+	}
 
 }
 
@@ -164,11 +164,7 @@ func sendContainer(functionStatus *FunctionStatus, container *ContainerInfo) {
 						if computeRequireMemory == 0 {
 							computeRequireMemory = functionStatus.RequireMemory
 						}
-						requireMemory := computeRequireMemory + cp.ReserveMemory
-						if requireMemory > functionStatus.RequireMemory {
-							requireMemory = functionStatus.RequireMemory
-						}
-						for atomic.LoadInt64(&(nowContainer.AvailableMemInBytes)) >= requireMemory {
+						for atomic.LoadInt64(&(nowContainer.AvailableMemInBytes)) >= computeRequireMemory {
 							if len(functionStatus.SendContainerChan) <
 								int(atomic.LoadInt32(&(functionStatus.NeedCacheRequestNum))) {
 
@@ -179,6 +175,7 @@ func sendContainer(functionStatus *FunctionStatus, container *ContainerInfo) {
 									memory:    computeRequireMemory,
 								}
 							} else {
+								logger.Infof("&d, SendContainerChan", len(functionStatus.SendContainerChan))
 								nowContainer.Unlock()
 								return
 							}
@@ -234,8 +231,11 @@ func ComputeRequireMemory(functionStatus *FunctionStatus, nowRequestMaxMemory in
 	if nowRequestMaxMemory > maxMemory {
 		maxMemory = nowRequestMaxMemory
 	}
-	if maxMemory > atomic.LoadInt64(&(functionStatus.ComputeRequireMemory)) &&
-		maxMemory <= functionStatus.RequireMemory {
+	if maxMemory > atomic.LoadInt64(&(functionStatus.ComputeRequireMemory)) {
+		maxMemory = maxMemory * cp.ComputeMemoryRatio
+		if maxMemory > functionStatus.RequireMemory {
+			maxMemory = functionStatus.RequireMemory
+		}
 		atomic.StoreInt64(&(functionStatus.ComputeRequireMemory), maxMemory)
 	}
 	logger.Infof("%s, maxMemoryUsage: %d, cpuNeedMemory: %d", functionStatus.FunctionName, maxMemoryUsage, cpuNeedMemory)
