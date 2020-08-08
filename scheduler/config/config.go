@@ -16,8 +16,8 @@ const (
 	NeedLog          = false
 
 	Timout             = 30 * time.Second
-	ChannelTimeout     = 10 * time.Millisecond
-	WaitChannelTimeout = 10 * time.Second
+	ChannelTimeout     = 2000 * time.Millisecond // 取创建一个容器的平均时间
+	WaitChannelTimeout = 40 * time.Second
 )
 
 var Global = &Config{}

@@ -36,16 +36,16 @@ type RequestStatus struct {
 
 	functionStatus *FunctionStatus
 	containerInfo  *ContainerInfo
-
-	isFirstRound bool
 }
 
 type FunctionStatus struct {
+	FunctionName         string
 	NeedCacheRequestNum  int32
-	IsFirstRound         bool
+	IsFirstRound         int32
 	RequireMemory        int64
 	ComputeRequireMemory int64
 	ReturnContainerChan  chan *ContainerInfo
+	SendContainerChan    chan struct{}
 	ContainerIdList      cmap.ConcurrentMap
 	NodeContainerMap     cmap.ConcurrentMap // nodeNo -> ContainerMap
 }
@@ -75,9 +75,11 @@ type Router struct {
 }
 
 var ProcessChan chan *model.ResponseInfo
+var BeginSendContainerChan chan *FunctionStatus
 
 func NewRouter(config *cp.Config, rmClient rmPb.ResourceManagerClient) *Router {
 	ProcessChan = make(chan *model.ResponseInfo, 1000)
+	BeginSendContainerChan = make(chan *FunctionStatus, 100)
 	// 取结构体地址表示实例化
 	return &Router{
 		nodeMap: &LockMap{
@@ -100,36 +102,34 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 
 	// 取该函数相关信息
 	r.functionMap.SetIfAbsent(req.FunctionName, &FunctionStatus{
+		FunctionName:         req.FunctionName,
 		NeedCacheRequestNum:  0,
-		IsFirstRound:         true,
+		IsFirstRound:         1,
 		RequireMemory:        req.FunctionConfig.MemoryInBytes,
 		ComputeRequireMemory: 0,
 		ReturnContainerChan:  make(chan *ContainerInfo, 1000),
+		SendContainerChan:    make(chan struct{}),
 		ContainerIdList:      cmap.New(),
 		NodeContainerMap:     cmap.New(),
 	})
+
 	fmObj, _ := r.functionMap.Get(req.FunctionName)
 	functionStatus := fmObj.(*FunctionStatus)
-	isFirstRound := functionStatus.IsFirstRound
+	if functionStatus.NeedCacheRequestNum == 0 {
+		logger.Infof("first, %s", functionStatus.FunctionName)
+		BeginSendContainerChan <- functionStatus
+	}
 
 	var actualRequireMemory int64
 
-	if functionStatus.ComputeRequireMemory == 0 {
-		actualRequireMemory = functionStatus.RequireMemory
-	} else {
-		actualRequireMemory = functionStatus.ComputeRequireMemory
+	actualRequireMemory = atomic.LoadInt64(&(functionStatus.ComputeRequireMemory))
+	if actualRequireMemory == 0 {
+		actualRequireMemory = req.FunctionConfig.MemoryInBytes
 	}
 
-	var waitContainerErr error
-	if isFirstRound {
-		var err error
-		res, err = r.createNewContainer(req, functionStatus, actualRequireMemory)
-		if res != nil {
-		} else {
-			waitContainerErr = errors.Wrapf(err, "fail to createNewContainer")
-		}
-	} else {
+	if atomic.LoadInt32(&(functionStatus.IsFirstRound)) == 0 {
 		timeout := time.NewTimer(cp.ChannelTimeout)
+		logger.Infof("ReturnContainerChan: %d", len(functionStatus.ReturnContainerChan))
 		select {
 		case res = <-functionStatus.ReturnContainerChan:
 			res.requests.Set(req.RequestId, 1)
@@ -137,37 +137,24 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 			logger.Infof("res id: %s, use exist container", req.RequestId)
 			break
 		case <-timeout.C:
-			waitContainerErr = errors.New("ReturnContainerChan timeout")
 		}
 	}
 
 	if res == nil {
-		logger.Warningf("wait reason %v", waitContainerErr)
-		now := time.Now().UnixNano()
-		var s string
-		for {
-			timeout := time.NewTimer(cp.Timout)
+		var err error
+		res, err = r.createNewContainer(req, functionStatus, actualRequireMemory)
+		if res == nil {
+			logger.Warningf("wait reason: %v", err)
+			timeout := time.NewTimer(cp.WaitChannelTimeout)
+			now := time.Now().UnixNano()
 			select {
 			case res = <-functionStatus.ReturnContainerChan:
 				res.requests.Set(req.RequestId, 1)
 				atomic.AddInt32(&(res.sendTime), -1)
-				s = "use exist container"
+				logger.Warningf("second wait latency %d ", (time.Now().UnixNano()-now)/1e6)
 				break
 			case <-timeout.C:
-				res, _ = r.createNewContainer(req, functionStatus, actualRequireMemory)
-				if res != nil {
-					s = "createNewContainer"
-					break
-				}
-			}
-			latency := time.Now().UnixNano() - now
-			if res != nil {
-				logger.Infof("res id: %s, %s second, latency: %d", req.RequestId, s, latency/1e6)
-				break
-			} else {
-				if latency > cp.WaitChannelTimeout.Nanoseconds() {
-					return nil, waitContainerErr
-				}
+				return nil, err
 			}
 		}
 	}
@@ -181,7 +168,6 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		FunctionTimeout:     req.FunctionConfig.TimeoutInMs,
 
 		containerInfo: res,
-		isFirstRound:  isFirstRound,
 
 		functionStatus: functionStatus,
 	}
@@ -203,10 +189,16 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 	createContainerErr := errors.Errorf("")
 	// 获取一个node，有满足容器内存要求的node直接返回该node，否则申请一个新的node返回
 	// 容器大小取多少？
-	node, err := r.getNode(actualRequireMemory, req)
+	r.nodeMap.Lock()
+	node, err := r.getNode(req)
 	if node == nil {
+		r.nodeMap.Unlock()
 		createContainerErr = err
 	} else {
+		atomic.AddInt64(&(node.availableMemInBytes), -req.FunctionConfig.MemoryInBytes)
+		node.requests.Set(req.RequestId, 1)
+		r.nodeMap.Unlock()
+
 		// 在node上创建运行该函数的容器，并保存容器信息
 		ctx, cancel := context.WithTimeout(context.Background(), cp.Timout)
 		defer cancel()
@@ -224,9 +216,10 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 		logger.Infof("CreateContainer, Latency: %d", (time.Now().UnixNano()-now)/1e6)
 		if replyC == nil {
 			// 没有创建成功则删除
+			atomic.AddInt64(&(node.availableMemInBytes), req.FunctionConfig.MemoryInBytes)
+			node.requests.Remove(req.RequestId)
 			createContainerErr = errors.Wrapf(err, "failed to create container on %s", node.address)
 		} else {
-			logger.Infof("NodeContainerMap %s", node.nodeNo)
 			functionStatus.NodeContainerMap.SetIfAbsent(node.nodeNo, &LockMap{
 				num:      0,
 				Internal: cmap.New(),
@@ -243,8 +236,7 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 				requests:            cmap.New(),
 			}
 			// 新键的容器还没添加进containerMap所以不用锁
-			atomic.AddInt64(&(node.availableMemInBytes), -actualRequireMemory)
-			node.requests.Set(req.RequestId, 1)
+			node.containers.Set(res.ContainerId, 1)
 
 			res.requests.Set(req.RequestId, 1)
 			nodeContainerMap.Internal.Set(containerNo, res)
@@ -255,10 +247,10 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 	return res, createContainerErr
 }
 
-func (r *Router) getNode(actualRequireMemory int64, req *pb.AcquireContainerRequest) (*NodeInfo, error) {
+func (r *Router) getNode(req *pb.AcquireContainerRequest) (*NodeInfo, error) {
 	var node *NodeInfo
 
-	node = r.getAvailableNode(actualRequireMemory, req)
+	node = r.getAvailableNode(req)
 
 	if node != nil {
 		logger.Infof("rq id: %s, get exist node: %s", req.RequestId, node.nodeID)
@@ -308,8 +300,8 @@ func (r *Router) getNode(actualRequireMemory int64, req *pb.AcquireContainerRequ
 }
 
 // 取满足要求情况下，资源最少的节点，以达到紧密排布, 优先取保留节点
-func (r *Router) getAvailableNode(actualRequireMemory int64, req *pb.AcquireContainerRequest) *NodeInfo {
-	var res *NodeInfo
+func (r *Router) getAvailableNode(req *pb.AcquireContainerRequest) *NodeInfo {
+	var node *NodeInfo
 	//r.nodeMap.Lock()
 
 	nodeNum := atomic.LoadInt32(&r.nodeMap.num)
@@ -318,14 +310,14 @@ func (r *Router) getAvailableNode(actualRequireMemory int64, req *pb.AcquireCont
 		if ok {
 			nowNode := nodeObj.(*NodeInfo)
 			availableMemInBytes := atomic.LoadInt64(&(nowNode.availableMemInBytes))
-			if availableMemInBytes > actualRequireMemory {
-				res = nowNode
+			if availableMemInBytes > req.FunctionConfig.MemoryInBytes {
+				node = nowNode
 				break
 			}
 		}
 	}
 	//r.nodeMap.Unlock()
-	return res
+	return node
 }
 
 func (r *Router) ReturnContainer(ctx context.Context, res *model.ResponseInfo) error {
