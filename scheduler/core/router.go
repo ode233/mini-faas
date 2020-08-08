@@ -41,11 +41,9 @@ type RequestStatus struct {
 type FunctionStatus struct {
 	sync.Mutex
 	FunctionName         string
-	NeedCacheRequestNum  int32
-	IsFirstRound         int32
 	RequireMemory        int64
 	ComputeRequireMemory int64
-	SendContainerChan    chan *SendContainerStruct
+	SendContainerChan    chan *ContainerInfo
 	ContainerIdList      cmap.ConcurrentMap
 	NodeContainerMap     cmap.ConcurrentMap // nodeNo -> ContainerMap
 }
@@ -55,7 +53,6 @@ type ContainerInfo struct {
 	ContainerId         string // container_id
 	nodeInfo            *NodeInfo
 	AvailableMemInBytes int64
-	isReserved          bool
 	containerNo         string
 	sendTime            int32
 	// 用ConcurrentMap读写锁可能会导致删除容器时重复删除
@@ -66,11 +63,6 @@ type LockMap struct {
 	sync.Mutex
 	Internal cmap.ConcurrentMap
 	num      int32
-}
-
-type SendContainerStruct struct {
-	container *ContainerInfo
-	memory    int64
 }
 
 type Router struct {
@@ -107,11 +99,9 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	// 取该函数相关信息
 	r.functionMap.SetIfAbsent(req.FunctionName, &FunctionStatus{
 		FunctionName:         req.FunctionName,
-		NeedCacheRequestNum:  0,
-		IsFirstRound:         1,
 		RequireMemory:        req.FunctionConfig.MemoryInBytes,
 		ComputeRequireMemory: 0,
-		SendContainerChan:    make(chan *SendContainerStruct, 1000),
+		SendContainerChan:    make(chan *ContainerInfo, 100),
 		ContainerIdList:      cmap.New(),
 		NodeContainerMap:     cmap.New(),
 	})
@@ -121,42 +111,32 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 
 	var actualRequireMemory int64
 
-	//actualRequireMemory = atomic.LoadInt64(&(functionStatus.ComputeRequireMemory))
-	//if actualRequireMemory == 0 {
-	//	actualRequireMemory = req.FunctionConfig.MemoryInBytes
-	//}
+	actualRequireMemory = atomic.LoadInt64(&(functionStatus.ComputeRequireMemory))
+	if actualRequireMemory == 0 {
+		actualRequireMemory = req.FunctionConfig.MemoryInBytes
+	}
 
-	actualRequireMemory = req.FunctionConfig.MemoryInBytes
-
-	if atomic.LoadInt32(&(functionStatus.IsFirstRound)) == 0 {
-		timeout := time.NewTimer(cp.ChannelTimeout)
-		logger.Infof("SendContainerChan: %d", len(functionStatus.SendContainerChan))
-		select {
-		case sendContainerStruct := <-functionStatus.SendContainerChan:
-			res = sendContainerStruct.container
-			atomic.AddInt32(&(res.sendTime), -1)
-			actualRequireMemory = sendContainerStruct.memory
-			logger.Infof("res id: %s, use exist container", req.RequestId)
-			break
-		case <-timeout.C:
-			break
-		}
+	timeout := time.NewTimer(cp.ChannelTimeout)
+	logger.Infof("SendContainerChan: %d", len(functionStatus.SendContainerChan))
+	select {
+	case res = <-functionStatus.SendContainerChan:
+		atomic.AddInt32(&(res.sendTime), -1)
+		logger.Infof("res id: %s, use exist container", req.RequestId)
+		break
+	case <-timeout.C:
+		break
 	}
 
 	if res == nil {
 		var err error
-		atomic.AddInt32(&(functionStatus.NeedCacheRequestNum), 1*cp.SendContainerRatio)
-		logger.Infof("%s, NeedCacheRequestNum: %d", req.FunctionName, functionStatus.NeedCacheRequestNum)
 		res, err = r.createNewContainer(req, functionStatus, actualRequireMemory)
 		if res == nil {
 			logger.Warningf("wait reason: %v", err)
 			timeout := time.NewTimer(cp.WaitChannelTimeout)
 			now := time.Now().UnixNano()
 			select {
-			case sendContainerStruct := <-functionStatus.SendContainerChan:
-				res = sendContainerStruct.container
+			case res = <-functionStatus.SendContainerChan:
 				atomic.AddInt32(&(res.sendTime), -1)
-				actualRequireMemory = sendContainerStruct.memory
 				logger.Warningf("second wait latency %d ", (time.Now().UnixNano()-now)/1e6)
 				break
 			case <-timeout.C:
@@ -237,7 +217,6 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 			res = &ContainerInfo{
 				ContainerId:         replyC.ContainerId,
 				nodeInfo:            node,
-				isReserved:          true,
 				containerNo:         containerNo,
 				AvailableMemInBytes: req.FunctionConfig.MemoryInBytes,
 				requests:            cmap.New(),

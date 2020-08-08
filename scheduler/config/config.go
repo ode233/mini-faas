@@ -8,7 +8,7 @@ const (
 
 	MemoryPerCpu = 1 * 1024 * 1024 * 1024 / 0.67
 
-	ComputeMemoryRatio = 3
+	ComputeMemoryRatio = 2
 	SendContainerRatio = 10
 
 	ReserveMemory = 32 * 1024 * 1024
@@ -21,7 +21,7 @@ const (
 	NeedLog          = false
 
 	Timout             = 30 * time.Second
-	ChannelTimeout     = 2 * time.Second // 取创建一个容器的平均时间
+	ChannelTimeout     = 10 * time.Millisecond
 	WaitChannelTimeout = 40 * time.Second
 )
 

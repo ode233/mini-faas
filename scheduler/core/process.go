@@ -91,34 +91,19 @@ func processReturnContainer(res *model.ResponseInfo) {
 	container := requestStatus.containerInfo
 	nodeInfo := container.nodeInfo
 
-	if atomic.LoadInt32(&(functionStatus.IsFirstRound)) == 1 {
-		atomic.StoreInt32(&(functionStatus.IsFirstRound), 0)
-		logger.Infof("FirstRoundRequestNum: %d", functionStatus.NeedCacheRequestNum)
-		//nodeGS, _ := nodeInfo.GetStats(context.Background(), &nsPb.GetStatsRequest{})
-		//data, _ := json.MarshalIndent(nodeGS, "", "    ")
-		//logger.Infof("GetStatsRequest:\n%s", data)
+	if res.MaxMemoryUsageInBytes > atomic.LoadInt64(&(functionStatus.ComputeRequireMemory)) {
+		atomic.StoreInt64(&(functionStatus.ComputeRequireMemory), res.MaxMemoryUsageInBytes)
 	}
 
-	functionStatus.Lock()
-	if atomic.LoadInt64(&(functionStatus.ComputeRequireMemory)) == 0 {
-		sendContainer(functionStatus, container)
-		ComputeRequireMemory(functionStatus, res.MaxMemoryUsageInBytes)
-	} else {
-		atomic.AddInt64(&(container.AvailableMemInBytes), requestStatus.ActualRequireMemory)
-		sendContainer(functionStatus, nil)
-	}
-	functionStatus.Unlock()
-
-	//if functionStatus.ComputeRequireMemory < res.MaxMemoryUsageInBytes {
-	//	functionStatus.ComputeRequireMemory = res.MaxMemoryUsageInBytes
-	//}
+	atomic.AddInt64(&(container.AvailableMemInBytes), requestStatus.ActualRequireMemory)
+	sendContainer(functionStatus)
 
 	container.requests.Remove(res.RequestID)
 	nodeInfo.requests.Remove(res.RequestID)
 
 	containerMapObj, _ := functionStatus.NodeContainerMap.Get(nodeInfo.nodeNo)
 	containerMap := containerMapObj.(*LockMap)
-	container.Lock()
+	containerMap.Lock()
 	if container.requests.Count() < 1 && atomic.LoadInt32(&(container.sendTime)) < 1 {
 		containerMap.Internal.Remove(container.containerNo)
 		nodeInfo.containers.Remove(res.ContainerId)
@@ -129,7 +114,8 @@ func processReturnContainer(res *model.ResponseInfo) {
 		})
 		logger.Infof("%s RemoveContainer", functionStatus.FunctionName)
 	}
-	container.Unlock()
+	containerMap.Unlock()
+	r.nodeMap.Lock()
 	if nodeInfo.requests.Count() < 1 && nodeInfo.containers.Count() < 1 {
 		r.nodeMap.Internal.Remove(nodeInfo.nodeNo)
 		go r.rmClient.ReleaseNode(context.Background(), &rmPb.ReleaseNodeRequest{
@@ -138,105 +124,32 @@ func processReturnContainer(res *model.ResponseInfo) {
 		})
 		logger.Infof("%s ReleaseNode", functionStatus.FunctionName)
 	}
+	r.nodeMap.Unlock()
 
 }
 
-func sendContainer(functionStatus *FunctionStatus, container *ContainerInfo) {
-	if container != nil {
-		atomic.AddInt32(&(container.sendTime), 1)
-		functionStatus.SendContainerChan <- &SendContainerStruct{
-			container: container,
-			memory:    functionStatus.RequireMemory,
-		}
-	} else {
-		nodeNum := atomic.LoadInt32(&(r.nodeMap.num))
-		for i := 1; i <= int(nodeNum); i++ {
-			containerMapObj, ok := functionStatus.NodeContainerMap.Get(strconv.Itoa(i))
-			if ok {
-				containerMap := containerMapObj.(*LockMap)
-				containerNum := atomic.LoadInt32(&(containerMap.num))
-				for j := 1; j <= int(containerNum); j++ {
-					nowContainerObj, ok := containerMap.Internal.Get(strconv.Itoa(j))
-					if ok {
-						nowContainer := nowContainerObj.(*ContainerInfo)
-						nowContainer.Lock()
-						computeRequireMemory := atomic.LoadInt64(&(functionStatus.ComputeRequireMemory))
-						if computeRequireMemory == 0 {
-							computeRequireMemory = functionStatus.RequireMemory
-						}
-						for atomic.LoadInt64(&(nowContainer.AvailableMemInBytes)) >= computeRequireMemory {
-							if len(functionStatus.SendContainerChan) <
-								int(atomic.LoadInt32(&(functionStatus.NeedCacheRequestNum))) {
-
-								atomic.AddInt32(&(nowContainer.sendTime), 1)
-								atomic.AddInt64(&(nowContainer.AvailableMemInBytes), -computeRequireMemory)
-								functionStatus.SendContainerChan <- &SendContainerStruct{
-									container: nowContainer,
-									memory:    computeRequireMemory,
-								}
-							} else {
-								logger.Infof("&d, SendContainerChan", len(functionStatus.SendContainerChan))
-								nowContainer.Unlock()
-								return
-							}
-						}
-						nowContainer.Unlock()
+func sendContainer(functionStatus *FunctionStatus) {
+	nodeNum := atomic.LoadInt32(&(r.nodeMap.num))
+	for i := 1; i <= int(nodeNum); i++ {
+		containerMapObj, ok := functionStatus.NodeContainerMap.Get(strconv.Itoa(i))
+		if ok {
+			containerMap := containerMapObj.(*LockMap)
+			containerNum := atomic.LoadInt32(&(containerMap.num))
+			for j := 1; j <= int(containerNum); j++ {
+				containerMap.Lock()
+				nowContainerObj, ok := containerMap.Internal.Get(strconv.Itoa(j))
+				if ok {
+					nowContainer := nowContainerObj.(*ContainerInfo)
+					computeRequireMemory := atomic.LoadInt64(&(functionStatus.ComputeRequireMemory))
+					if atomic.LoadInt64(&(nowContainer.AvailableMemInBytes)) >= computeRequireMemory {
+						functionStatus.SendContainerChan <- nowContainer
+						atomic.AddInt32(&(nowContainer.sendTime), 1)
+						containerMap.Unlock()
+						return
 					}
 				}
+				containerMap.Unlock()
 			}
 		}
 	}
-}
-
-func ComputeRequireMemory(functionStatus *FunctionStatus, nowRequestMaxMemory int64) {
-	maxMemoryUsage := int64(0)
-	maxCpuUsagePct := float64(0)
-	for _, key := range functionStatus.NodeContainerMap.Keys() {
-		nodeInfoObj, ok := r.nodeMap.Internal.Get(key)
-		if !ok {
-			continue
-		}
-		nodeInfo := nodeInfoObj.(*NodeInfo)
-		nodeGS, _ := nodeInfo.GetStats(context.Background(), &nsPb.GetStatsRequest{})
-
-		data, _ := json.MarshalIndent(nodeGS, "", "    ")
-		logger.Infof("GetStatsRequest:\n%s", data)
-
-		for _, val := range nodeGS.ContainerStatsList {
-			containerObj, ok := functionStatus.ContainerIdList.Get(val.ContainerId)
-			if ok {
-				container := containerObj.(*ContainerInfo)
-				num := container.requests.Count()
-				if val.MemoryUsageInBytes == 0 || num == 0 {
-					continue
-				}
-				memoryUsageInBytes := val.MemoryUsageInBytes / int64(num)
-				if memoryUsageInBytes > maxMemoryUsage {
-					maxMemoryUsage = memoryUsageInBytes
-				}
-				cpuUsagePct := val.CpuUsagePct / float64(num)
-				if cpuUsagePct > maxCpuUsagePct {
-					maxCpuUsagePct = cpuUsagePct
-				}
-			}
-		}
-	}
-	cpuNeedMemory := int64(maxCpuUsagePct * 0.01 * cp.MemoryPerCpu)
-	var maxMemory int64
-	if cpuNeedMemory > maxMemoryUsage {
-		maxMemory = cpuNeedMemory
-	} else {
-		maxMemory = maxMemoryUsage
-	}
-	if nowRequestMaxMemory > maxMemory {
-		maxMemory = nowRequestMaxMemory
-	}
-	if maxMemory > atomic.LoadInt64(&(functionStatus.ComputeRequireMemory)) {
-		maxMemory = maxMemory * cp.ComputeMemoryRatio
-		if maxMemory > functionStatus.RequireMemory {
-			maxMemory = functionStatus.RequireMemory
-		}
-		atomic.StoreInt64(&(functionStatus.ComputeRequireMemory), maxMemory)
-	}
-	logger.Infof("%s, maxMemoryUsage: %d, cpuNeedMemory: %d", functionStatus.FunctionName, maxMemoryUsage, cpuNeedMemory)
 }
