@@ -100,9 +100,9 @@ func processReturnContainer(res *model.ResponseInfo) {
 	}
 
 	functionStatus.Lock()
-	ComputeRequireMemory(functionStatus, res.MaxMemoryUsageInBytes)
 	if atomic.LoadInt64(&(functionStatus.ComputeRequireMemory)) == 0 {
 		sendContainer(functionStatus, container)
+		ComputeRequireMemory(functionStatus, res.MaxMemoryUsageInBytes)
 	} else {
 		atomic.AddInt64(&(container.AvailableMemInBytes), requestStatus.ActualRequireMemory)
 		sendContainer(functionStatus, nil)
