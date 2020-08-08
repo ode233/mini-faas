@@ -135,9 +135,6 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		case sendContainerStruct := <-functionStatus.SendContainerChan:
 			res = sendContainerStruct.container
 			actualRequireMemory = sendContainerStruct.memory
-			res.requests.Set(req.RequestId, 1)
-			atomic.AddInt64(&(res.AvailableMemInBytes), -actualRequireMemory)
-			atomic.AddInt32(&(res.sendTime), -1)
 			logger.Infof("res id: %s, use exist container", req.RequestId)
 			break
 		case <-timeout.C:
@@ -157,9 +154,6 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 			case sendContainerStruct := <-functionStatus.SendContainerChan:
 				res = sendContainerStruct.container
 				actualRequireMemory = sendContainerStruct.memory
-				res.requests.Set(req.RequestId, 1)
-				atomic.AddInt64(&(res.AvailableMemInBytes), -actualRequireMemory)
-				atomic.AddInt32(&(res.sendTime), -1)
 				logger.Warningf("second wait latency %d ", (time.Now().UnixNano()-now)/1e6)
 				break
 			case <-timeout.C:
@@ -167,6 +161,10 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 			}
 		}
 	}
+
+	res.requests.Set(req.RequestId, 1)
+	atomic.AddInt64(&(res.AvailableMemInBytes), -actualRequireMemory)
+	atomic.AddInt32(&(res.sendTime), -1)
 
 	requestStatus := &RequestStatus{
 		FunctionName:        req.FunctionName,
@@ -221,7 +219,7 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 			},
 			RequestId: req.RequestId,
 		})
-		logger.Infof("CreateContainer, Latency: %d", (time.Now().UnixNano()-now)/1e6)
+		logger.Infof("%s CreateContainer, Latency: %d", functionStatus.FunctionName, (time.Now().UnixNano()-now)/1e6)
 		if replyC == nil {
 			// 没有创建成功则删除
 			atomic.AddInt64(&(node.availableMemInBytes), req.FunctionConfig.MemoryInBytes)
@@ -240,7 +238,7 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 				nodeInfo:            node,
 				isReserved:          true,
 				containerNo:         containerNo,
-				AvailableMemInBytes: req.FunctionConfig.MemoryInBytes - actualRequireMemory,
+				AvailableMemInBytes: req.FunctionConfig.MemoryInBytes,
 				requests:            cmap.New(),
 			}
 			// 新键的容器还没添加进containerMap所以不用锁
