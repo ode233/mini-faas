@@ -8,6 +8,8 @@ const (
 
 	MemoryPerCpu = 1 * 1024 * 1024 * 1024 / 0.67
 
+	ReserveMemory = 32 * 1024 * 1024
+
 	ReserveContainerNumRadio   = 2
 	ReserveContainerCacheRadio = 0.2
 
