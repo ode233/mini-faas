@@ -2,10 +2,11 @@ package core
 
 import (
 	"aliyun/serverless/mini-faas/scheduler/model"
+	"aliyun/serverless/mini-faas/scheduler/utils/icmap"
 	"aliyun/serverless/mini-faas/scheduler/utils/logger"
 	"context"
 	uuid "github.com/satori/go.uuid"
-	"strconv"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,7 +45,7 @@ type FunctionStatus struct {
 	RequireMemory        int64
 	ComputeRequireMemory int64
 	SendContainerChan    chan *ContainerInfo
-	NodeContainerMap     cmap.ConcurrentMap // nodeNo -> ContainerMap
+	NodeContainerMap     icmap.ConcurrentMap // nodeNo -> ContainerMap
 }
 
 type ContainerInfo struct {
@@ -52,7 +53,7 @@ type ContainerInfo struct {
 	ContainerId         string // container_id
 	nodeInfo            *NodeInfo
 	AvailableMemInBytes int64
-	containerNo         string
+	containerNo         int
 	sendTime            int32
 	// 用ConcurrentMap读写锁可能会导致删除容器时重复删除
 	requests cmap.ConcurrentMap // request_id -> status
@@ -60,7 +61,7 @@ type ContainerInfo struct {
 
 type LockMap struct {
 	sync.Mutex
-	Internal cmap.ConcurrentMap
+	Internal icmap.ConcurrentMap
 	num      int32
 }
 
@@ -78,7 +79,7 @@ func NewRouter(config *cp.Config, rmClient rmPb.ResourceManagerClient) *Router {
 	// 取结构体地址表示实例化
 	return &Router{
 		nodeMap: &LockMap{
-			Internal: cmap.New(),
+			Internal: icmap.New(),
 		},
 		functionMap: cmap.New(),
 		RequestMap:  cmap.New(),
@@ -101,7 +102,7 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		RequireMemory:        req.FunctionConfig.MemoryInBytes,
 		ComputeRequireMemory: 0,
 		SendContainerChan:    make(chan *ContainerInfo, 300),
-		NodeContainerMap:     cmap.New(),
+		NodeContainerMap:     icmap.New(),
 	})
 
 	fmObj, _ := r.functionMap.Get(req.FunctionName)
@@ -110,7 +111,7 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	var computeRequireMemory int64
 
 	var err error
-	computeRequireMemory = atomic.LoadInt64(&(functionStatus.ComputeRequireMemory))
+	computeRequireMemory = functionStatus.ComputeRequireMemory
 	if computeRequireMemory == 0 {
 		computeRequireMemory = req.FunctionConfig.MemoryInBytes
 		res, err = r.createNewContainer(req, functionStatus, computeRequireMemory)
@@ -216,11 +217,11 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 		} else {
 			functionStatus.NodeContainerMap.SetIfAbsent(node.nodeNo, &LockMap{
 				num:      0,
-				Internal: cmap.New(),
+				Internal: icmap.New(),
 			})
 			nodeContainerMapObj, _ := functionStatus.NodeContainerMap.Get(node.nodeNo)
 			nodeContainerMap := nodeContainerMapObj.(*LockMap)
-			containerNo := strconv.Itoa(int(atomic.AddInt32(&(nodeContainerMap.num), 1)))
+			containerNo := int(atomic.AddInt32(&(nodeContainerMap.num), 1))
 			res = &ContainerInfo{
 				ContainerId:         replyC.ContainerId,
 				nodeInfo:            node,
@@ -256,39 +257,49 @@ func (r *Router) getNode(req *pb.AcquireContainerRequest) (*NodeInfo, error) {
 			return nil, errors.Errorf("node maximum limit reached")
 		}
 
-		// 超时没有请求到节点就取消
-		ctxR, cancelR := context.WithTimeout(context.Background(), cp.Timout)
-		defer cancelR()
-		now := time.Now().UnixNano()
-		replyRn, err := r.rmClient.ReserveNode(ctxR, &rmPb.ReserveNodeRequest{})
-		latency := (time.Now().UnixNano() - now) / 1e6
-		if err != nil {
-			return nil, errors.Errorf("Failed to reserve node due to %v, Latency: %d", err, latency)
-		}
-		logger.Infof("ReserveNode,NodeAddress: %s, Latency: %d", replyRn.Node.Address, latency)
+		var err error
+		node, err = r.reserveNode()
 
-		nodeDesc := replyRn.Node
-		nodeNo := strconv.Itoa(int(atomic.AddInt32(&r.nodeMap.num, 1)))
-		// 本地ReserveNode 返回的可用memory 比 node.GetStats少了一倍, 比赛环境正常
-		node, err := NewNode(nodeDesc.Id, nodeNo, nodeDesc.Address, nodeDesc.NodeServicePort, nodeDesc.MemoryInBytes)
-		logger.Infof("ReserveNode memory: %d", nodeDesc.MemoryInBytes)
-		if err != nil {
-			return nil, errors.Errorf("Failed to NewNode %v", err)
-		}
-
-		//用node.GetStats重置可用内存
-		//nodeGS, _ := node.GetStats(context.Background(), &nsPb.GetStatsRequest{})
-		//node.availableMemInBytes = nodeGS.NodeStats.AvailableMemoryInBytes
-
-		// 不加锁可能出现两个先写，之后读的时候本来有一个是可以保留的，但是读的是都是最新值导致都没法保留
-		//r.nodeMap.Lock()
-		r.nodeMap.Internal.Set(nodeNo, node)
-		logger.Infof("ReserveNode id: %s", nodeDesc.Id)
-		//r.nodeMap.Unlock()
-
-		//申请新节点时，打印所有节点信息
-		return node, nil
+		return node, err
 	}
+}
+
+func (r *Router) reserveNode() (*NodeInfo, error) {
+	// 超时没有请求到节点就取消
+	ctxR, cancelR := context.WithTimeout(context.Background(), cp.Timout)
+	defer cancelR()
+	now := time.Now().UnixNano()
+	replyRn, err := r.rmClient.ReserveNode(ctxR, &rmPb.ReserveNodeRequest{})
+	latency := (time.Now().UnixNano() - now) / 1e6
+	if err != nil {
+		logger.Errorf("Failed to reserve node due to %v, Latency: %d", err, latency)
+		time.Sleep(100 * time.Millisecond)
+		return nil, err
+	}
+	if replyRn == nil {
+		time.Sleep(100 * time.Millisecond)
+		return nil, err
+	}
+	logger.Infof("ReserveNode,NodeAddress: %s, Latency: %d", replyRn.Node.Address, latency)
+
+	nodeDesc := replyRn.Node
+	nodeNo := int(atomic.AddInt32(&r.nodeMap.num, 1))
+	// 本地ReserveNode 返回的可用memory 比 node.GetStats少了一倍, 比赛环境正常
+	node, err := NewNode(nodeDesc.Id, nodeNo, nodeDesc.Address, nodeDesc.NodeServicePort, nodeDesc.MemoryInBytes)
+	logger.Infof("ReserveNode memory: %d, nodeNo: %s", nodeDesc.MemoryInBytes, nodeNo)
+	if err != nil {
+		logger.Errorf("Failed to NewNode %v", err)
+		return nil, err
+	}
+
+	//用node.GetStats重置可用内存
+	//nodeGS, _ := node.GetStats(context.Background(), &nsPb.GetStatsRequest{})
+	//node.availableMemInBytes = nodeGS.NodeStats.AvailableMemoryInBytes
+
+	r.nodeMap.Internal.Set(node.nodeNo, node)
+	logger.Infof("ReserveNode id: %s", nodeDesc.Id)
+
+	return node, nil
 }
 
 // 取满足要求情况下，资源最少的节点，以达到紧密排布, 优先取保留节点
@@ -296,12 +307,11 @@ func (r *Router) getAvailableNode(req *pb.AcquireContainerRequest) *NodeInfo {
 	var node *NodeInfo
 	r.nodeMap.Lock()
 
-	nodeNum := atomic.LoadInt32(&r.nodeMap.num)
-	for i := 1; i <= int(nodeNum); i++ {
-		nodeObj, ok := r.nodeMap.Internal.Get(strconv.Itoa(i))
+	for _, i := range sortedKeys(r.nodeMap.Internal.Keys()) {
+		nodeObj, ok := r.nodeMap.Internal.Get(i)
 		if ok {
 			nowNode := nodeObj.(*NodeInfo)
-			availableMemInBytes := atomic.LoadInt64(&(nowNode.availableMemInBytes))
+			availableMemInBytes := nowNode.availableMemInBytes
 			if availableMemInBytes > req.FunctionConfig.MemoryInBytes {
 				node = nowNode
 				break
@@ -313,18 +323,16 @@ func (r *Router) getAvailableNode(req *pb.AcquireContainerRequest) *NodeInfo {
 }
 
 func (r *Router) getAvailableContainer(functionStatus *FunctionStatus, computeRequireMemory int64) *ContainerInfo {
-	nodeNum := atomic.LoadInt32(&(r.nodeMap.num))
-	for i := 1; i <= int(nodeNum); i++ {
-		containerMapObj, ok := functionStatus.NodeContainerMap.Get(strconv.Itoa(i))
+	for _, i := range sortedKeys(r.nodeMap.Internal.Keys()) {
+		containerMapObj, ok := functionStatus.NodeContainerMap.Get(i)
 		if ok {
 			containerMap := containerMapObj.(*LockMap)
-			containerNum := atomic.LoadInt32(&(containerMap.num))
-			for j := 1; j <= int(containerNum); j++ {
+			for _, j := range sortedKeys(containerMap.Internal.Keys()) {
 				containerMap.Lock()
-				nowContainerObj, ok := containerMap.Internal.Get(strconv.Itoa(j))
+				nowContainerObj, ok := containerMap.Internal.Get(j)
 				if ok {
 					nowContainer := nowContainerObj.(*ContainerInfo)
-					if atomic.LoadInt64(&(nowContainer.AvailableMemInBytes)) >= computeRequireMemory {
+					if nowContainer.AvailableMemInBytes >= computeRequireMemory {
 						containerMap.Unlock()
 						return nowContainer
 					}
@@ -346,4 +354,9 @@ func (r *Router) ReturnContainer(ctx context.Context, res *model.ResponseInfo) e
 		break
 	}
 	return nil
+}
+
+func sortedKeys(keys []int) []int {
+	sort.Ints(keys)
+	return keys
 }

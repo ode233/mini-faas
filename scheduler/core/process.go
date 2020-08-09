@@ -8,9 +8,7 @@ import (
 	"aliyun/serverless/mini-faas/scheduler/utils/logger"
 	"context"
 	"encoding/json"
-	"strconv"
 	"sync/atomic"
-	"time"
 )
 
 var r *Router
@@ -19,7 +17,7 @@ func Process(router *Router) {
 	r = router
 	go func() {
 		for {
-			reserveNode()
+			r.reserveNode()
 			if r.nodeMap.num >= cp.MaxNodeNum {
 				break
 			}
@@ -32,41 +30,6 @@ func Process(router *Router) {
 			go processReturnContainer(responseInfo)
 		}
 	}()
-}
-
-func reserveNode() {
-	// 超时没有请求到节点就取消
-	ctxR, cancelR := context.WithTimeout(context.Background(), cp.Timout)
-	defer cancelR()
-	now := time.Now().UnixNano()
-	replyRn, err := r.rmClient.ReserveNode(ctxR, &rmPb.ReserveNodeRequest{})
-	latency := (time.Now().UnixNano() - now) / 1e6
-	if err != nil {
-		logger.Errorf("Failed to reserve node due to %v, Latency: %d", err, latency)
-		time.Sleep(100 * time.Millisecond)
-		return
-	}
-	if replyRn == nil {
-		time.Sleep(100 * time.Millisecond)
-		return
-	}
-	logger.Infof("ReserveNode,NodeAddress: %s, Latency: %d", replyRn.Node.Address, latency)
-
-	nodeDesc := replyRn.Node
-	nodeNo := strconv.Itoa(int(atomic.AddInt32(&r.nodeMap.num, 1)))
-	// 本地ReserveNode 返回的可用memory 比 node.GetStats少了一倍, 比赛环境正常
-	node, err := NewNode(nodeDesc.Id, nodeNo, nodeDesc.Address, nodeDesc.NodeServicePort, nodeDesc.MemoryInBytes)
-	logger.Infof("ReserveNode memory: %d, nodeNo: %s", nodeDesc.MemoryInBytes, nodeNo)
-	if err != nil {
-		logger.Errorf("Failed to NewNode %v", err)
-	}
-
-	//用node.GetStats重置可用内存
-	//nodeGS, _ := node.GetStats(context.Background(), &nsPb.GetStatsRequest{})
-	//node.availableMemInBytes = nodeGS.NodeStats.AvailableMemoryInBytes
-
-	r.nodeMap.Internal.Set(nodeNo, node)
-	logger.Infof("ReserveNode id: %s", nodeDesc.Id)
 }
 
 func processReturnContainer(res *model.ResponseInfo) {
@@ -105,7 +68,7 @@ func processReturnContainer(res *model.ResponseInfo) {
 	nodeInfo.requests.Remove(res.RequestID)
 
 	containerMap.Lock()
-	if container.requests.Count() < 1 && atomic.LoadInt32(&(container.sendTime)) < 1 {
+	if container.requests.Count() < 1 && container.sendTime < 1 {
 		containerMap.Internal.Remove(container.containerNo)
 		nodeInfo.containers.Remove(res.ContainerId)
 		atomic.AddInt64(&(nodeInfo.availableMemInBytes), requestStatus.RequireMemory)
@@ -131,6 +94,10 @@ func processReturnContainer(res *model.ResponseInfo) {
 }
 
 func sendContainer(functionStatus *FunctionStatus, computeRequireMemory int64) {
+	newComputeRequireMemory := computeRequireMemory * cp.SendComputeMemoryRatio
+	if newComputeRequireMemory > functionStatus.RequireMemory {
+		newComputeRequireMemory = functionStatus.RequireMemory
+	}
 	for i := 0; i < cp.SendContainerRatio; i++ {
 		container := r.getAvailableContainer(functionStatus, computeRequireMemory)
 		if container != nil {

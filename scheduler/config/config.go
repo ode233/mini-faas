@@ -8,8 +8,8 @@ const (
 
 	MemoryPerCpu = 1 * 1024 * 1024 * 1024 / 0.67
 
-	ComputeMemoryRatio = 2
-	SendContainerRatio = 2
+	SendComputeMemoryRatio = 2
+	SendContainerRatio     = 6
 
 	ReserveMemory = 32 * 1024 * 1024
 
@@ -21,7 +21,7 @@ const (
 	NeedLog          = false
 
 	Timout             = 30 * time.Second
-	ChannelTimeout     = 10 * time.Millisecond
+	ChannelTimeout     = 100 * time.Millisecond
 	WaitChannelTimeout = 40 * time.Second
 )
 
