@@ -3,7 +3,7 @@
 # Edit at https://www.toptal.com/developers/gitignore?templates=go,windows,linux,macos,sublimetext,vim,emacs
 
 scheduler
-
+!scheduler/utils/icmap
 ### Emacs ###
 # -*- mode: gitignore; -*-
 *~
