@@ -41,11 +41,15 @@ type RequestStatus struct {
 
 type FunctionStatus struct {
 	sync.Mutex
-	FunctionName         string
-	RequireMemory        int64
-	ComputeRequireMemory int64
-	SendContainerChan    chan *ContainerInfo
-	NodeContainerMap     icmap.ConcurrentMap // nodeNo -> ContainerMap
+	FunctionName              string
+	RequireMemory             int64
+	ComputeRequireMemory      int64
+	MaxMemoryUsageInBytes     int64
+	BaseTimeIncreaseChangeNum int32
+	BaseTimeDecreaseChangeNum int32
+	BaseExecutionTime         int64
+	SendContainerChan         chan *SendContainerStruct
+	NodeContainerMap          icmap.ConcurrentMap // nodeNo -> ContainerMap
 }
 
 type ContainerInfo struct {
@@ -63,6 +67,11 @@ type LockMap struct {
 	sync.Mutex
 	Internal icmap.ConcurrentMap
 	num      int32
+}
+
+type SendContainerStruct struct {
+	container            *ContainerInfo
+	computeRequireMemory int64
 }
 
 type Router struct {
@@ -100,8 +109,8 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	r.functionMap.SetIfAbsent(req.FunctionName, &FunctionStatus{
 		FunctionName:         req.FunctionName,
 		RequireMemory:        req.FunctionConfig.MemoryInBytes,
-		ComputeRequireMemory: 0,
-		SendContainerChan:    make(chan *ContainerInfo, 300),
+		ComputeRequireMemory: req.FunctionConfig.MemoryInBytes,
+		SendContainerChan:    make(chan *SendContainerStruct, 300),
 		NodeContainerMap:     icmap.New(),
 	})
 
@@ -112,8 +121,8 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 
 	var err error
 	computeRequireMemory = functionStatus.ComputeRequireMemory
-	if computeRequireMemory == 0 {
-		computeRequireMemory = req.FunctionConfig.MemoryInBytes
+
+	if functionStatus.MaxMemoryUsageInBytes == 0 {
 		res, err = r.createNewContainer(req, functionStatus, computeRequireMemory)
 		if err != nil {
 			logger.Warningf("first createNewContainer error: %v", err)
@@ -121,7 +130,9 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	} else {
 		timeout := time.NewTimer(cp.ChannelTimeout)
 		select {
-		case res = <-functionStatus.SendContainerChan:
+		case sendContainerStruct := <-functionStatus.SendContainerChan:
+			res = sendContainerStruct.container
+			computeRequireMemory = sendContainerStruct.computeRequireMemory
 			atomic.AddInt32(&(res.sendTime), -1)
 			logger.Infof("res id: %s, first wait, use exist container", req.RequestId)
 			break
@@ -141,7 +152,9 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 				timeout := time.NewTimer(cp.WaitChannelTimeout)
 				now := time.Now().UnixNano()
 				select {
-				case res = <-functionStatus.SendContainerChan:
+				case sendContainerStruct := <-functionStatus.SendContainerChan:
+					res = sendContainerStruct.container
+					computeRequireMemory = sendContainerStruct.computeRequireMemory
 					atomic.AddInt32(&(res.sendTime), -1)
 					logger.Warningf("second wait latency %d ", (time.Now().UnixNano()-now)/1e6)
 					break
@@ -157,7 +170,6 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	}
 
 	res.requests.Set(req.RequestId, 1)
-	atomic.AddInt64(&(res.AvailableMemInBytes), -computeRequireMemory)
 
 	requestStatus := &RequestStatus{
 		FunctionName:        req.FunctionName,
@@ -167,9 +179,8 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		ActualRequireMemory: computeRequireMemory,
 		FunctionTimeout:     req.FunctionConfig.TimeoutInMs,
 
-		containerInfo: res,
-
 		functionStatus: functionStatus,
+		containerInfo:  res,
 	}
 
 	r.RequestMap.Set(req.RequestId, requestStatus)
@@ -332,7 +343,8 @@ func (r *Router) getAvailableContainer(functionStatus *FunctionStatus, computeRe
 				nowContainerObj, ok := containerMap.Internal.Get(j)
 				if ok {
 					nowContainer := nowContainerObj.(*ContainerInfo)
-					if nowContainer.AvailableMemInBytes >= computeRequireMemory {
+					if atomic.LoadInt64(&(nowContainer.AvailableMemInBytes)) >= computeRequireMemory {
+						atomic.AddInt64(&(nowContainer.AvailableMemInBytes), -computeRequireMemory)
 						containerMap.Unlock()
 						return nowContainer
 					}

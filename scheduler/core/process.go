@@ -54,18 +54,53 @@ func processReturnContainer(res *model.ResponseInfo) {
 	container := requestStatus.containerInfo
 	nodeInfo := container.nodeInfo
 
-	if res.MaxMemoryUsageInBytes > functionStatus.ComputeRequireMemory {
-		functionStatus.ComputeRequireMemory = res.MaxMemoryUsageInBytes
+	if res.MaxMemoryUsageInBytes > functionStatus.MaxMemoryUsageInBytes {
+		functionStatus.MaxMemoryUsageInBytes = res.MaxMemoryUsageInBytes
 	}
 
-	atomic.AddInt64(&(container.AvailableMemInBytes), requestStatus.ActualRequireMemory)
-	sendContainer(functionStatus, functionStatus.ComputeRequireMemory)
+	var newComputeRequireMemory int64
+	nowComputeRequireMemory := functionStatus.ComputeRequireMemory
+
+	if functionStatus.BaseExecutionTime == 0 {
+		functionStatus.BaseExecutionTime = res.DurationInNanos
+	} else {
+		if requestStatus.ActualRequireMemory == nowComputeRequireMemory {
+			radio := float64(res.DurationInNanos) / float64(functionStatus.BaseExecutionTime)
+			if radio <= cp.BaseTimeDecreaseRatio {
+				functionStatus.BaseTimeDecreaseChangeNum += 1
+				if functionStatus.BaseTimeDecreaseChangeNum >= cp.BaseTimeChangeNum {
+					newComputeRequireMemory = nowComputeRequireMemory / 2
+					if newComputeRequireMemory <= functionStatus.MaxMemoryUsageInBytes {
+						newComputeRequireMemory = functionStatus.MaxMemoryUsageInBytes
+					}
+					atomic.StoreInt64(&(functionStatus.ComputeRequireMemory), newComputeRequireMemory)
+					functionStatus.BaseTimeDecreaseChangeNum = 0
+					logger.Infof("%s, ComputeRequireMemory decrease: %d", functionStatus.FunctionName, functionStatus.ComputeRequireMemory)
+				}
+			} else if radio >= cp.BaseTimeIncreaseRatio {
+				functionStatus.BaseTimeIncreaseChangeNum += 1
+				if functionStatus.BaseTimeIncreaseChangeNum >= cp.BaseTimeChangeNum {
+					newComputeRequireMemory = int64(float64(nowComputeRequireMemory) * radio)
+					if newComputeRequireMemory >= functionStatus.RequireMemory {
+						newComputeRequireMemory = functionStatus.RequireMemory
+					}
+					atomic.StoreInt64(&(functionStatus.ComputeRequireMemory), newComputeRequireMemory)
+					functionStatus.BaseTimeIncreaseChangeNum = 0
+					logger.Infof("%s, ComputeRequireMemory increase: %d", functionStatus.FunctionName, functionStatus.ComputeRequireMemory)
+
+				}
+			}
+		}
+	}
 
 	containerMapObj, _ := functionStatus.NodeContainerMap.Get(nodeInfo.nodeNo)
 	containerMap := containerMapObj.(*LockMap)
 
 	container.requests.Remove(res.RequestID)
 	nodeInfo.requests.Remove(res.RequestID)
+
+	atomic.AddInt64(&(container.AvailableMemInBytes), requestStatus.ActualRequireMemory)
+	sendContainer(functionStatus, functionStatus.ComputeRequireMemory)
 
 	containerMap.Lock()
 	if container.requests.Count() < 1 && container.sendTime < 1 {
@@ -76,7 +111,7 @@ func processReturnContainer(res *model.ResponseInfo) {
 			RequestId:   res.RequestID,
 			ContainerId: container.ContainerId,
 		})
-		logger.Infof("%s RemoveContainer", functionStatus.FunctionName)
+		logger.Infof("%s RemoveContainer, id: %s", functionStatus.FunctionName, container.ContainerId)
 	}
 	containerMap.Unlock()
 
@@ -94,15 +129,17 @@ func processReturnContainer(res *model.ResponseInfo) {
 }
 
 func sendContainer(functionStatus *FunctionStatus, computeRequireMemory int64) {
-	newComputeRequireMemory := computeRequireMemory * cp.SendComputeMemoryRatio
-	if newComputeRequireMemory > functionStatus.RequireMemory {
-		newComputeRequireMemory = functionStatus.RequireMemory
-	}
 	for i := 0; i < cp.SendContainerRatio; i++ {
+		//data, _ := json.MarshalIndent(functionStatus.NodeContainerMap, "", "    ")
+		//logger.Infof("sendContainer\n%s",  data)
 		container := r.getAvailableContainer(functionStatus, computeRequireMemory)
 		if container != nil {
-			functionStatus.SendContainerChan <- container
 			atomic.AddInt32(&(container.sendTime), 1)
+			logger.Infof("sendContainer id %s", container.ContainerId)
+			functionStatus.SendContainerChan <- &SendContainerStruct{
+				container:            container,
+				computeRequireMemory: computeRequireMemory,
+			}
 		}
 	}
 }

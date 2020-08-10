@@ -55,11 +55,11 @@ func main() {
 	data, _ := json.MarshalIndent(lfReply.Functions, "", "    ")
 	logger.Infof("lfReply.Functions:\n%s", data)
 
-	for i := 0; i < 200; i++ {
+	for i := 0; i < 100; i++ {
 		for _, f := range lfReply.Functions {
 			e := sampleEvents[f.FunctionName]
 			event := fmt.Sprintf(`{"functionName": "%s", "param": "%s"}`, f.FunctionName, e)
-			for j := 0; j < 10; j++ {
+			for j := 0; j < 5; j++ {
 				//invokeFunction(asClient, f.FunctionName, []byte(event))
 				go invokeFunction(asClient, f.FunctionName, []byte(event))
 				wg.Add(1)
