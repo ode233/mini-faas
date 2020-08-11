@@ -5,7 +5,6 @@ import (
 	"aliyun/serverless/mini-faas/scheduler/utils/icmap"
 	"aliyun/serverless/mini-faas/scheduler/utils/logger"
 	"context"
-	"encoding/json"
 	uuid "github.com/satori/go.uuid"
 	"sort"
 	"sync"
@@ -21,20 +20,8 @@ import (
 )
 
 type RequestStatus struct {
-	FunctionName string
-	NodeAddress  string
-	ContainerId  string
-	// ms
-	ScheduleAcquireContainerLatency int64
-	ScheduleReturnContainerLatency  int64
-	FunctionExecutionDuration       int64
-	ResponseTime                    int64
 	// bytes
-	RequireMemory       int64
-	MaxMemoryUsage      int64
 	ActualRequireMemory int64
-
-	FunctionTimeout int64
 
 	functionStatus *FunctionStatus
 	containerInfo  *ContainerInfo
@@ -160,12 +147,7 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	}
 
 	requestStatus := &RequestStatus{
-		FunctionName:        req.FunctionName,
-		NodeAddress:         res.nodeInfo.address,
-		ContainerId:         res.ContainerId,
-		RequireMemory:       req.FunctionConfig.MemoryInBytes,
 		ActualRequireMemory: computeRequireMemory,
-		FunctionTimeout:     req.FunctionConfig.TimeoutInMs,
 
 		functionStatus: functionStatus,
 		containerInfo:  res,
@@ -320,10 +302,6 @@ func (r *Router) reserveNode() (*NodeInfo, error) {
 		return nil, err
 	}
 
-	//用node.GetStats重置可用内存
-	//nodeGS, _ := node.GetStats(context.Background(), &nsPb.GetStatsRequest{})
-	//node.availableMemInBytes = nodeGS.NodeStats.AvailableMemoryInBytes
-
 	r.nodeMap.Internal.Set(node.nodeNo, node)
 	logger.Infof("ReserveNode id: %s", nodeDesc.Id)
 
@@ -362,16 +340,8 @@ func (r *Router) processReturnContainer(res *model.ResponseInfo) {
 		return
 	}
 	requestStatus := rmObj.(*RequestStatus)
-	requestStatus.FunctionExecutionDuration = res.DurationInNanos
-	requestStatus.MaxMemoryUsage = res.MaxMemoryUsageInBytes
 
 	// 更新本次调用相关信息
-	requestStatus.ResponseTime = requestStatus.ScheduleAcquireContainerLatency +
-		requestStatus.FunctionExecutionDuration + requestStatus.ScheduleReturnContainerLatency
-	data, _ := json.MarshalIndent(requestStatus, "", "    ")
-	logger.Infof("\nrequest id: %s\n%s", res.RequestID, data)
-	logger.Infof("%s request finish, function name: %s", res.RequestID, requestStatus.FunctionName)
-	r.RequestMap.Remove(res.RequestID)
 
 	functionStatus := requestStatus.functionStatus
 	container := requestStatus.containerInfo
@@ -381,7 +351,9 @@ func (r *Router) processReturnContainer(res *model.ResponseInfo) {
 	atomic.AddInt64(&(container.AvailableMemInBytes), requestStatus.ActualRequireMemory)
 	r.sendContainer(functionStatus, functionStatus.ComputeRequireMemory)
 
-	r.tryReleaseResources(res, requestStatus, functionStatus, container)
+	r.tryReleaseResources(res, functionStatus, container)
+
+	r.RequestMap.Remove(res.RequestID)
 
 }
 
@@ -440,8 +412,7 @@ func (r *Router) sendContainer(functionStatus *FunctionStatus, computeRequireMem
 	}
 }
 
-func (r *Router) tryReleaseResources(res *model.ResponseInfo, requestStatus *RequestStatus,
-	functionStatus *FunctionStatus, container *ContainerInfo) {
+func (r *Router) tryReleaseResources(res *model.ResponseInfo, functionStatus *FunctionStatus, container *ContainerInfo) {
 	if container.AvailableMemInBytes == functionStatus.ContainerTotalMemory {
 		for i := 0; i < 10; i++ {
 			time.Sleep(cp.ReleaseResourcesTimeout)
@@ -454,7 +425,7 @@ func (r *Router) tryReleaseResources(res *model.ResponseInfo, requestStatus *Req
 		containerMap := containerMapObj.(*LockMap)
 		//containerMap.Lock()
 		containerMap.Internal.Remove(container.containerNo)
-		atomic.AddInt64(&(nodeInfo.availableMemInBytes), requestStatus.RequireMemory)
+		atomic.AddInt64(&(nodeInfo.availableMemInBytes), functionStatus.ContainerTotalMemory)
 		go nodeInfo.RemoveContainer(context.Background(), &nsPb.RemoveContainerRequest{
 			RequestId:   res.RequestID,
 			ContainerId: container.ContainerId,

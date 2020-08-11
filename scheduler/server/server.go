@@ -38,18 +38,13 @@ func (s *Server) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		return nil, grpc.Errorf(codes.InvalidArgument, "function config cannot be nil")
 	}
 	logger.Infof("request id: %s, request function name: %s", req.RequestId, req.FunctionName)
-	now := time.Now().UnixNano()
 	reply, err := s.router.AcquireContainer(ctx, req)
-	latency := (time.Now().UnixNano() - now) / 1e6
 	if err != nil {
-		logger.Errorf("request id: %s, function name: %s, Failed to acquire due to %v, Latency: %d",
-			req.RequestId, req.FunctionName, err, latency)
+		logger.Errorf("request id: %s, function name: %s, Failed to acquire due to %v",
+			req.RequestId, req.FunctionName, err)
 		return nil, err
 	}
-	logger.Infof("request id: %s, AcquireContainer, Latency: %d", req.RequestId, latency)
-	requestStatusObj, _ := s.router.RequestMap.Get(req.RequestId)
-	requestStatus := requestStatusObj.(*core.RequestStatus)
-	requestStatus.ScheduleAcquireContainerLatency = latency
+	logger.Infof("request id: %s, AcquireContainer", req.RequestId)
 	return reply, nil
 }
 
