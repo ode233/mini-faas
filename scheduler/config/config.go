@@ -10,8 +10,6 @@ const (
 
 	MaxBaseTimeRatio = 1.5
 
-	BaseTimeChangeNum = 5
-
 	FirstWaitChannelTimeout = 10 * time.Millisecond
 	LastWaitChannelTimeout  = 40 * time.Second
 

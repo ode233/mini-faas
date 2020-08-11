@@ -28,14 +28,13 @@ type RequestStatus struct {
 }
 
 type FunctionStatus struct {
-	containerTotalMemory      int64
-	computeRequireMemory      int64
-	maxMemoryUsageInBytes     int64
-	baseTimeIncreaseChangeNum int32
-	baseExecutionTime         int64
-	tryDecreaseMemory         bool
-	sendContainerChan         chan *SendContainerStruct
-	nodeContainerMap          icmap.ConcurrentMap // nodeNo -> ContainerMap
+	containerTotalMemory  int64
+	computeRequireMemory  int64
+	maxMemoryUsageInBytes int64
+	baseExecutionTime     int64
+	tryDecreaseMemory     bool
+	sendContainerChan     chan *SendContainerStruct
+	nodeContainerMap      icmap.ConcurrentMap // nodeNo -> ContainerMap
 }
 
 type ContainerInfo struct {
@@ -79,6 +78,7 @@ func NewRouter(config *cp.Config, rmClient rmPb.ResourceManagerClient) *Router {
 // 给结构体类型的引用添加方法，相当于添加实例方法，直接给结构体添加方法相当于静态方法
 func (r *Router) Start() {
 	// Just in case the router has internal loops.
+
 	go func() {
 		logger.Infof("ReserveNode in advance begin ")
 		for {
@@ -346,10 +346,10 @@ func (r *Router) processReturnContainer(res *model.ResponseInfo) {
 //computeRequireMemory 计算所需内存并更新相关数据
 func (r *Router) computeRequireMemory(functionStatus *FunctionStatus, res *model.ResponseInfo, requestStatus *RequestStatus) {
 	if res.MaxMemoryUsageInBytes > functionStatus.maxMemoryUsageInBytes {
-		if functionStatus.computeRequireMemory == functionStatus.maxMemoryUsageInBytes {
+		functionStatus.maxMemoryUsageInBytes = res.MaxMemoryUsageInBytes
+		if functionStatus.computeRequireMemory < res.MaxMemoryUsageInBytes {
 			functionStatus.computeRequireMemory = res.MaxMemoryUsageInBytes
 		}
-		functionStatus.maxMemoryUsageInBytes = res.MaxMemoryUsageInBytes
 	}
 
 	if requestStatus.actualRequireMemory >= functionStatus.containerTotalMemory {
@@ -358,30 +358,28 @@ func (r *Router) computeRequireMemory(functionStatus *FunctionStatus, res *model
 		}
 	}
 
-	nowComputeRequireMemory := atomic.LoadInt64(&(functionStatus.computeRequireMemory))
+	nowComputeRequireMemory := functionStatus.computeRequireMemory
 	if functionStatus.tryDecreaseMemory && requestStatus.actualRequireMemory == nowComputeRequireMemory {
 		var newComputeRequireMemory int64
 		// 先考虑增加内存
 		if nowComputeRequireMemory < functionStatus.containerTotalMemory {
 			radio := float64(res.DurationInNanos) / float64(functionStatus.baseExecutionTime)
 			if radio > cp.MaxBaseTimeRatio {
-				functionStatus.baseTimeIncreaseChangeNum += 1
-				if functionStatus.baseTimeIncreaseChangeNum >= cp.BaseTimeChangeNum {
-					newComputeRequireMemory = nowComputeRequireMemory * 2
-					functionStatus.baseTimeIncreaseChangeNum = 0
-					functionStatus.tryDecreaseMemory = false
-				}
+				newComputeRequireMemory = nowComputeRequireMemory * 2
+				functionStatus.tryDecreaseMemory = false
 			}
 		}
 		// 再考虑减小内存
 		if functionStatus.tryDecreaseMemory {
-			newComputeRequireMemory = nowComputeRequireMemory / 2
-			if newComputeRequireMemory < functionStatus.maxMemoryUsageInBytes {
-				newComputeRequireMemory = functionStatus.maxMemoryUsageInBytes
+			halfMemory := nowComputeRequireMemory / 2
+			if halfMemory > functionStatus.maxMemoryUsageInBytes {
+				newComputeRequireMemory = halfMemory
+			} else {
+				functionStatus.tryDecreaseMemory = false
 			}
 		}
 
-		atomic.StoreInt64(&(functionStatus.computeRequireMemory), newComputeRequireMemory)
+		functionStatus.computeRequireMemory = newComputeRequireMemory
 	}
 }
 
