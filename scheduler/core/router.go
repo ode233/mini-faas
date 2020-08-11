@@ -356,7 +356,7 @@ func (r *Router) computeRequireMemory(functionStatus *FunctionStatus, res *model
 		}
 	}
 
-	nowComputeRequireMemory := functionStatus.computeRequireMemory
+	nowComputeRequireMemory := atomic.LoadInt64(&(functionStatus.computeRequireMemory))
 	if functionStatus.tryDecreaseMemory && requestStatus.actualRequireMemory == nowComputeRequireMemory {
 		var newComputeRequireMemory int64
 		// 先考虑增加内存
@@ -377,7 +377,7 @@ func (r *Router) computeRequireMemory(functionStatus *FunctionStatus, res *model
 			}
 		}
 
-		functionStatus.computeRequireMemory = newComputeRequireMemory
+		atomic.StoreInt64(&(functionStatus.computeRequireMemory), newComputeRequireMemory)
 	}
 }
 
