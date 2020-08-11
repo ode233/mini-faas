@@ -2,7 +2,6 @@ package core
 
 import (
 	"fmt"
-	cmap "github.com/orcaman/concurrent-map"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 	"sync"
@@ -18,11 +17,7 @@ type NodeInfo struct {
 	address             string
 	port                int64
 	availableMemInBytes int64
-
-	// request,container都要，可能当前的container在发送中
-	//因为由于container的创建要等待，那么就无法立马存入container_id，可能导致正在创建container的节点被误认为没有使用，导致被误删。
-	requests   cmap.ConcurrentMap // requests_id -> status
-	containers cmap.ConcurrentMap
+	totalMemInBytes     int64
 
 	conn *grpc.ClientConn
 	pb.NodeServiceClient
@@ -39,8 +34,7 @@ func NewNode(nodeID string, nodeNo int, address string, port, memory int64) (*No
 		address:             address,
 		port:                port,
 		availableMemInBytes: memory,
-		requests:            cmap.New(),
-		containers:          cmap.New(),
+		totalMemInBytes:     memory,
 		conn:                conn,
 		NodeServiceClient:   pb.NewNodeServiceClient(conn),
 	}, nil

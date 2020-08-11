@@ -3,30 +3,16 @@ package config
 import "time"
 
 const (
-	MaxNodeNum     = 10
-	ReserveNodeNum = 5
+	MaxNodeNum = 10
 
-	MemoryPerCpu = 1 * 1024 * 1024 * 1024 / 0.67
+	ReleaseResourcesTimeout = 1 * time.Second
 
-	SendComputeMemoryRatio = 1
-	SendContainerRatio     = 1
-
-	BaseTimeIncreaseRatio = 1.6
-	BaseTimeDecreaseRatio = 1.2
+	MaxBaseTimeRatio = 1.5
 
 	BaseTimeChangeNum = 5
 
-	ReserveMemory = 32 * 1024 * 1024
-
-	ReserveContainerNumRadio   = 2
-	ReserveContainerCacheRadio = 0.2
-
-	// 隔多少次请求打印一次节点日志
-	LogPrintInterval = 20
-	NeedLog          = false
-
 	Timout             = 30 * time.Second
-	ChannelTimeout     = 100 * time.Millisecond
+	ChannelTimeout     = 10 * time.Millisecond
 	WaitChannelTimeout = 40 * time.Second
 )
 

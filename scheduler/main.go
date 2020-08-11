@@ -106,8 +106,6 @@ func main() {
 		return
 	}
 
-	go core.Process(router)
-
 	go svr.Serve(lis)
 
 	select {
