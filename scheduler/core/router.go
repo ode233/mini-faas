@@ -46,7 +46,7 @@ type ContainerInfo struct {
 }
 
 type LockMap struct {
-	sync.Mutex
+	sync.RWMutex
 	internal icmap.ConcurrentMap
 	num      int32
 }
@@ -178,19 +178,19 @@ func (r *Router) getAvailableContainer(functionStatus *FunctionStatus, computeRe
 		containerMapObj, ok := functionStatus.nodeContainerMap.Get(i)
 		if ok {
 			containerMap := containerMapObj.(*LockMap)
-			//containerMap.Lock()
+			containerMap.RLock()
 			for _, j := range sortedKeys(containerMap.internal.Keys()) {
 				nowContainerObj, ok := containerMap.internal.Get(j)
 				if ok {
 					nowContainer := nowContainerObj.(*ContainerInfo)
 					if atomic.LoadInt64(&(nowContainer.availableMemInBytes)) >= computeRequireMemory {
 						atomic.AddInt64(&(nowContainer.availableMemInBytes), -computeRequireMemory)
-						//containerMap.Unlock()
+						containerMap.RUnlock()
 						return nowContainer
 					}
 				}
 			}
-			//containerMap.Unlock()
+			containerMap.RUnlock()
 		}
 	}
 	return nil
@@ -299,20 +299,18 @@ func (r *Router) reserveNode() (*NodeInfo, error) {
 // 取满足要求情况下，资源最少的节点，以达到紧密排布, 优先取保留节点
 func (r *Router) getAvailableNode(req *pb.AcquireContainerRequest) *NodeInfo {
 	var node *NodeInfo
-	//r.nodeMap.Lock()
-
+	r.nodeMap.RLock()
 	for _, i := range sortedKeys(r.nodeMap.internal.Keys()) {
 		nodeObj, ok := r.nodeMap.internal.Get(i)
 		if ok {
 			nowNode := nodeObj.(*NodeInfo)
-			availableMemInBytes := nowNode.availableMemInBytes
-			if availableMemInBytes > req.FunctionConfig.MemoryInBytes {
+			if atomic.LoadInt64(&(nowNode.availableMemInBytes)) > req.FunctionConfig.MemoryInBytes {
 				node = nowNode
 				break
 			}
 		}
 	}
-	//r.nodeMap.Unlock()
+	r.nodeMap.RUnlock()
 	return node
 }
 
@@ -394,41 +392,41 @@ func (r *Router) sendContainer(functionStatus *FunctionStatus, computeRequireMem
 }
 
 func (r *Router) tryReleaseResources(res *model.ResponseInfo, functionStatus *FunctionStatus, container *ContainerInfo) {
-	if container.availableMemInBytes == functionStatus.containerTotalMemory {
-		for i := 0; i < cp.ReleaseResourcesTimeoutNum; i++ {
-			time.Sleep(cp.ReleaseResourcesTimeout)
-			if container.availableMemInBytes < functionStatus.containerTotalMemory {
-				return
-			}
-		}
+	if atomic.LoadInt64(&(container.availableMemInBytes)) == functionStatus.containerTotalMemory {
 		nodeInfo := container.nodeInfo
 		containerMapObj, _ := functionStatus.nodeContainerMap.Get(nodeInfo.nodeNo)
 		containerMap := containerMapObj.(*LockMap)
-		//containerMap.Lock()
+		for i := 0; i < cp.ReleaseResourcesTimeoutNum; i++ {
+			time.Sleep(cp.ReleaseResourcesTimeout)
+			if atomic.LoadInt64(&(container.availableMemInBytes)) < functionStatus.containerTotalMemory {
+				return
+			}
+		}
+		containerMap.Lock()
 		containerMap.internal.Remove(container.containerNo)
+		containerMap.Unlock()
 		atomic.AddInt64(&(nodeInfo.availableMemInBytes), functionStatus.containerTotalMemory)
 		go nodeInfo.RemoveContainer(context.Background(), &nsPb.RemoveContainerRequest{
 			RequestId:   res.RequestID,
 			ContainerId: container.containerId,
 		})
 		logger.Infof("RemoveContainer")
-		//containerMap.Unlock()
 
-		if nodeInfo.availableMemInBytes == nodeInfo.totalMemInBytes {
+		if atomic.LoadInt64(&(nodeInfo.availableMemInBytes)) == nodeInfo.totalMemInBytes {
 			for i := 0; i < cp.ReleaseResourcesTimeoutNum; i++ {
 				time.Sleep(cp.ReleaseResourcesTimeout)
-				if nodeInfo.availableMemInBytes < nodeInfo.totalMemInBytes {
+				if atomic.LoadInt64(&(nodeInfo.availableMemInBytes)) < nodeInfo.totalMemInBytes {
 					return
 				}
 			}
-			//r.nodeMap.Lock()
+			r.nodeMap.Lock()
 			r.nodeMap.internal.Remove(nodeInfo.nodeNo)
+			r.nodeMap.Unlock()
 			go r.rmClient.ReleaseNode(context.Background(), &rmPb.ReleaseNodeRequest{
 				RequestId: res.RequestID,
 				Id:        nodeInfo.nodeID,
 			})
 			logger.Infof("ReleaseNode")
-			//r.nodeMap.Unlock()
 		}
 	}
 }
