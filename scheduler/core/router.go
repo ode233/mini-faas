@@ -79,6 +79,16 @@ func NewRouter(config *cp.Config, rmClient rmPb.ResourceManagerClient) *Router {
 // 给结构体类型的引用添加方法，相当于添加实例方法，直接给结构体添加方法相当于静态方法
 func (r *Router) Start() {
 	// Just in case the router has internal loops.
+	go func() {
+		logger.Infof("ReserveNode in advance begin ")
+		for {
+			r.reserveNode()
+			if r.nodeMap.num >= cp.MaxNodeNum || r.requestMap.Count() > 0 {
+				logger.Infof("ReserveNode in advance finish")
+				break
+			}
+		}
+	}()
 }
 
 func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerRequest) (*pb.AcquireContainerReply, error) {
@@ -106,14 +116,14 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	if functionStatus.maxMemoryUsageInBytes == 0 {
 		res, err = r.createNewContainer(req, functionStatus, computeRequireMemory)
 		if res == nil {
-			sendContainerStruct := r.waitContainer(functionStatus, cp.WaitChannelTimeout)
+			sendContainerStruct := r.waitContainer(functionStatus, cp.LastWaitChannelTimeout)
 			if sendContainerStruct != nil {
 				res = sendContainerStruct.container
 				computeRequireMemory = sendContainerStruct.computeRequireMemory
 			}
 		}
 	} else { // 有函数返回时的调用
-		sendContainerStruct := r.waitContainer(functionStatus, cp.ChannelTimeout)
+		sendContainerStruct := r.waitContainer(functionStatus, cp.FirstWaitChannelTimeout)
 		if sendContainerStruct != nil {
 			res = sendContainerStruct.container
 			computeRequireMemory = sendContainerStruct.computeRequireMemory
@@ -122,7 +132,7 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 			if res == nil {
 				res, err = r.createNewContainer(req, functionStatus, computeRequireMemory)
 				if res == nil {
-					sendContainerStruct := r.waitContainer(functionStatus, cp.WaitChannelTimeout)
+					sendContainerStruct := r.waitContainer(functionStatus, cp.LastWaitChannelTimeout)
 					if sendContainerStruct != nil {
 						res = sendContainerStruct.container
 						computeRequireMemory = sendContainerStruct.computeRequireMemory
@@ -387,7 +397,7 @@ func (r *Router) sendContainer(functionStatus *FunctionStatus, computeRequireMem
 
 func (r *Router) tryReleaseResources(res *model.ResponseInfo, functionStatus *FunctionStatus, container *ContainerInfo) {
 	if container.availableMemInBytes == functionStatus.containerTotalMemory {
-		for i := 0; i < 10; i++ {
+		for i := 0; i < cp.ReleaseResourcesTimeoutNum; i++ {
 			time.Sleep(cp.ReleaseResourcesTimeout)
 			if container.availableMemInBytes < functionStatus.containerTotalMemory {
 				return
@@ -407,7 +417,7 @@ func (r *Router) tryReleaseResources(res *model.ResponseInfo, functionStatus *Fu
 		//containerMap.Unlock()
 
 		if nodeInfo.availableMemInBytes == nodeInfo.totalMemInBytes {
-			for i := 0; i < 10; i++ {
+			for i := 0; i < cp.ReleaseResourcesTimeoutNum; i++ {
 				time.Sleep(cp.ReleaseResourcesTimeout)
 				if nodeInfo.availableMemInBytes < nodeInfo.totalMemInBytes {
 					return

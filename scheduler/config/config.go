@@ -3,17 +3,19 @@ package config
 import "time"
 
 const (
-	MaxNodeNum = 10
+	MaxNodeNum = 20
 
-	ReleaseResourcesTimeout = 1 * time.Second
+	ReleaseResourcesTimeout    = 1 * time.Second
+	ReleaseResourcesTimeoutNum = 10
 
 	MaxBaseTimeRatio = 1.5
 
 	BaseTimeChangeNum = 5
 
-	Timout             = 30 * time.Second
-	ChannelTimeout     = 10 * time.Millisecond
-	WaitChannelTimeout = 40 * time.Second
+	FirstWaitChannelTimeout = 10 * time.Millisecond
+	LastWaitChannelTimeout  = 40 * time.Second
+
+	Timout = 30 * time.Second
 )
 
 var Global = &Config{}
