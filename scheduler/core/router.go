@@ -110,7 +110,7 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	var computeRequireMemory int64
 
 	var err error
-	computeRequireMemory = functionStatus.computeRequireMemory
+	computeRequireMemory = atomic.LoadInt64(&(functionStatus.computeRequireMemory))
 
 	// 还没有函数返回时的调用
 	if functionStatus.maxMemoryUsageInBytes == 0 {
@@ -358,7 +358,7 @@ func (r *Router) computeRequireMemory(functionStatus *FunctionStatus, res *model
 
 	nowComputeRequireMemory := atomic.LoadInt64(&(functionStatus.computeRequireMemory))
 	if functionStatus.tryDecreaseMemory && requestStatus.actualRequireMemory == nowComputeRequireMemory {
-		var newComputeRequireMemory int64
+		newComputeRequireMemory := nowComputeRequireMemory
 		// 先考虑增加内存
 		if nowComputeRequireMemory < functionStatus.containerTotalMemory {
 			radio := float64(res.DurationInNanos) / float64(functionStatus.baseExecutionTime)
@@ -392,43 +392,32 @@ func (r *Router) sendContainer(functionStatus *FunctionStatus, computeRequireMem
 }
 
 func (r *Router) tryReleaseResources(res *model.ResponseInfo, functionStatus *FunctionStatus, container *ContainerInfo) {
+	nodeInfo := container.nodeInfo
+	containerMapObj, _ := functionStatus.nodeContainerMap.Get(nodeInfo.nodeNo)
+	containerMap := containerMapObj.(*LockMap)
+	containerMap.Lock()
 	if atomic.LoadInt64(&(container.availableMemInBytes)) == functionStatus.containerTotalMemory {
-		nodeInfo := container.nodeInfo
-		containerMapObj, _ := functionStatus.nodeContainerMap.Get(nodeInfo.nodeNo)
-		containerMap := containerMapObj.(*LockMap)
-		for i := 0; i < cp.ReleaseResourcesTimeoutNum; i++ {
-			time.Sleep(cp.ReleaseResourcesTimeout)
-			if atomic.LoadInt64(&(container.availableMemInBytes)) < functionStatus.containerTotalMemory {
-				return
-			}
-		}
-		containerMap.Lock()
+
 		containerMap.internal.Remove(container.containerNo)
-		containerMap.Unlock()
 		atomic.AddInt64(&(nodeInfo.availableMemInBytes), functionStatus.containerTotalMemory)
 		go nodeInfo.RemoveContainer(context.Background(), &nsPb.RemoveContainerRequest{
 			RequestId:   res.RequestID,
 			ContainerId: container.containerId,
 		})
 		logger.Infof("RemoveContainer")
-
-		if atomic.LoadInt64(&(nodeInfo.availableMemInBytes)) == nodeInfo.totalMemInBytes {
-			for i := 0; i < cp.ReleaseResourcesTimeoutNum; i++ {
-				time.Sleep(cp.ReleaseResourcesTimeout)
-				if atomic.LoadInt64(&(nodeInfo.availableMemInBytes)) < nodeInfo.totalMemInBytes {
-					return
-				}
-			}
-			r.nodeMap.Lock()
-			r.nodeMap.internal.Remove(nodeInfo.nodeNo)
-			r.nodeMap.Unlock()
-			go r.rmClient.ReleaseNode(context.Background(), &rmPb.ReleaseNodeRequest{
-				RequestId: res.RequestID,
-				Id:        nodeInfo.nodeID,
-			})
-			logger.Infof("ReleaseNode")
-		}
 	}
+	containerMap.Unlock()
+
+	r.nodeMap.Lock()
+	if atomic.LoadInt64(&(nodeInfo.availableMemInBytes)) == nodeInfo.totalMemInBytes {
+		r.nodeMap.internal.Remove(nodeInfo.nodeNo)
+		go r.rmClient.ReleaseNode(context.Background(), &rmPb.ReleaseNodeRequest{
+			RequestId: res.RequestID,
+			Id:        nodeInfo.nodeID,
+		})
+		logger.Infof("ReleaseNode")
+	}
+	r.nodeMap.Unlock()
 }
 
 func sortedKeys(keys []int) []int {
