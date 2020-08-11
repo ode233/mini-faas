@@ -109,10 +109,8 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	if functionStatus.MaxMemoryUsageInBytes == 0 {
 		res, err = r.createNewContainer(req, functionStatus, computeRequireMemory)
 		if res == nil {
-			logger.Warningf("first round createNewContainer error: %v", err)
 			sendContainerStruct := r.waitContainer(functionStatus, cp.WaitChannelTimeout)
 			if sendContainerStruct != nil {
-				logger.Infof("res id: %s, first round wait to use exist container", req.RequestId)
 				res = sendContainerStruct.container
 				computeRequireMemory = sendContainerStruct.computeRequireMemory
 			}
@@ -120,20 +118,15 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	} else { // 有函数返回时的调用
 		sendContainerStruct := r.waitContainer(functionStatus, cp.ChannelTimeout)
 		if sendContainerStruct != nil {
-			logger.Infof("res id: %s, second round use exist container", req.RequestId)
 			res = sendContainerStruct.container
 			computeRequireMemory = sendContainerStruct.computeRequireMemory
 		} else {
-			logger.Infof("second round wait, timeout")
 			res = r.getAvailableContainer(functionStatus, computeRequireMemory)
 			if res == nil {
-				logger.Infof("second round getAvailableContainer fail")
 				res, err = r.createNewContainer(req, functionStatus, computeRequireMemory)
 				if res == nil {
-					logger.Warningf("second round createNewContainer error: %v", err)
 					sendContainerStruct := r.waitContainer(functionStatus, cp.WaitChannelTimeout)
 					if sendContainerStruct != nil {
-						logger.Infof("res id: %s, second round wait to use exist container", req.RequestId)
 						res = sendContainerStruct.container
 						computeRequireMemory = sendContainerStruct.computeRequireMemory
 					}
@@ -165,10 +158,8 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 
 func (r *Router) waitContainer(functionStatus *FunctionStatus, timeoutDuration time.Duration) *SendContainerStruct {
 	timeout := time.NewTimer(timeoutDuration)
-	now := time.Now().UnixNano()
 	select {
 	case sendContainerStruct := <-functionStatus.SendContainerChan:
-		logger.Warningf("latency %d ", (time.Now().UnixNano()-now)/1e6)
 		return sendContainerStruct
 	case <-timeout.C:
 		return nil
@@ -212,7 +203,6 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 		// 在node上创建运行该函数的容器，并保存容器信息
 		ctx, cancel := context.WithTimeout(context.Background(), cp.Timout)
 		defer cancel()
-		now := time.Now().UnixNano()
 		replyC, err := node.CreateContainer(ctx, &nsPb.CreateContainerRequest{
 			Name: req.FunctionName + uuid.NewV4().String(),
 			FunctionMeta: &nsPb.FunctionMeta{
@@ -223,7 +213,6 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 			},
 			RequestId: req.RequestId,
 		})
-		logger.Infof("%s CreateContainer, Latency: %d", functionStatus.FunctionName, (time.Now().UnixNano()-now)/1e6)
 		if replyC == nil {
 			// 没有创建成功则删除
 			atomic.AddInt64(&(node.availableMemInBytes), req.FunctionConfig.MemoryInBytes)
@@ -244,7 +233,6 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 			}
 			// 新键的容器还没添加进containerMap所以不用锁
 			nodeContainerMap.Internal.Set(containerNo, res)
-			logger.Infof("request id: %s, create container", req.RequestId)
 		}
 	}
 	return res, createContainerErr
@@ -256,7 +244,6 @@ func (r *Router) getNode(req *pb.AcquireContainerRequest) (*NodeInfo, error) {
 	node = r.getAvailableNode(req)
 
 	if node != nil {
-		logger.Infof("rq id: %s, get exist node: %s", req.RequestId, node.nodeID)
 		return node, nil
 	} else {
 
@@ -278,11 +265,8 @@ func (r *Router) reserveNode() (*NodeInfo, error) {
 	// 超时没有请求到节点就取消
 	ctxR, cancelR := context.WithTimeout(context.Background(), cp.Timout)
 	defer cancelR()
-	now := time.Now().UnixNano()
 	replyRn, err := r.rmClient.ReserveNode(ctxR, &rmPb.ReserveNodeRequest{})
-	latency := (time.Now().UnixNano() - now) / 1e6
 	if err != nil {
-		logger.Errorf("Failed to reserve node due to %v, Latency: %d", err, latency)
 		time.Sleep(100 * time.Millisecond)
 		return nil, err
 	}
@@ -290,13 +274,11 @@ func (r *Router) reserveNode() (*NodeInfo, error) {
 		time.Sleep(100 * time.Millisecond)
 		return nil, err
 	}
-	logger.Infof("ReserveNode,NodeAddress: %s, Latency: %d", replyRn.Node.Address, latency)
 
 	nodeDesc := replyRn.Node
 	nodeNo := int(atomic.AddInt32(&r.nodeMap.num, 1))
 	// 本地ReserveNode 返回的可用memory 比 node.GetStats少了一倍, 比赛环境正常
 	node, err := NewNode(nodeDesc.Id, nodeNo, nodeDesc.Address, nodeDesc.NodeServicePort, nodeDesc.MemoryInBytes)
-	logger.Infof("ReserveNode memory: %d, nodeNo: %s", nodeDesc.MemoryInBytes, nodeNo)
 	if err != nil {
 		logger.Errorf("Failed to NewNode %v", err)
 		return nil, err
@@ -400,11 +382,8 @@ func (r *Router) computeRequireMemory(functionStatus *FunctionStatus, res *model
 }
 
 func (r *Router) sendContainer(functionStatus *FunctionStatus, computeRequireMemory int64) {
-	//data, _ := json.MarshalIndent(functionStatus.NodeContainerMap, "", "    ")
-	//logger.Infof("sendContainer\n%s",  data)
 	container := r.getAvailableContainer(functionStatus, computeRequireMemory)
 	if container != nil {
-		logger.Infof("sendContainer id %s", container.ContainerId)
 		functionStatus.SendContainerChan <- &SendContainerStruct{
 			container:            container,
 			computeRequireMemory: computeRequireMemory,
