@@ -1,17 +1,13 @@
 package core
 
 import (
+	pb "aliyun/serverless/mini-faas/nodeservice/proto"
 	"fmt"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
-	"sync"
-
-	pb "aliyun/serverless/mini-faas/nodeservice/proto"
 )
 
 type NodeInfo struct {
-	sync.Mutex
-
 	nodeID              string
 	nodeNo              int
 	address             string

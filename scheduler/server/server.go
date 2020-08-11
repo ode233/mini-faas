@@ -3,12 +3,10 @@ package server
 import (
 	"aliyun/serverless/mini-faas/scheduler/model"
 	"aliyun/serverless/mini-faas/scheduler/utils/logger"
-	"sync"
-	"time"
-
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"sync"
 
 	"aliyun/serverless/mini-faas/scheduler/core"
 	pb "aliyun/serverless/mini-faas/scheduler/proto"
@@ -37,19 +35,16 @@ func (s *Server) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	if req.FunctionConfig == nil {
 		return nil, grpc.Errorf(codes.InvalidArgument, "function config cannot be nil")
 	}
-	logger.Infof("request id: %s, request function name: %s", req.RequestId, req.FunctionName)
 	reply, err := s.router.AcquireContainer(ctx, req)
 	if err != nil {
 		logger.Errorf("request id: %s, function name: %s, Failed to acquire due to %v",
 			req.RequestId, req.FunctionName, err)
 		return nil, err
 	}
-	logger.Infof("request id: %s, AcquireContainer", req.RequestId)
 	return reply, nil
 }
 
 func (s *Server) ReturnContainer(ctx context.Context, req *pb.ReturnContainerRequest) (*pb.ReturnContainerReply, error) {
-	now := time.Now().UnixNano()
 	err := s.router.ReturnContainer(ctx, &model.ResponseInfo{
 		RequestID:             req.RequestId,
 		ContainerId:           req.ContainerId,
@@ -57,14 +52,12 @@ func (s *Server) ReturnContainer(ctx context.Context, req *pb.ReturnContainerReq
 		DurationInNanos:       req.DurationInNanos / 1e6,
 	})
 
-	latency := (time.Now().UnixNano() - now) / 1e6
-
 	if req.ErrorMessage != "" {
 		logger.Errorf("request id: %s, ReturnContainerRequest error: %s", req.RequestId, req.ErrorMessage)
 	}
 
 	if err != nil {
-		logger.Errorf("Failed to return due to %v, Latency: %d", err, latency)
+		logger.Errorf("request id: %s, Failed to return due to %v", req.RequestId, err)
 		return nil, err
 	}
 
