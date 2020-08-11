@@ -317,6 +317,7 @@ func (r *Router) processReturnContainer(res *model.ResponseInfo) {
 		return
 	}
 	requestStatus := rmObj.(*RequestStatus)
+	r.requestMap.Remove(res.RequestID)
 
 	// 更新本次调用相关信息
 
@@ -329,8 +330,6 @@ func (r *Router) processReturnContainer(res *model.ResponseInfo) {
 	r.sendContainer(functionStatus, functionStatus.computeRequireMemory)
 
 	r.tryReleaseResources(res, functionStatus, container)
-
-	r.requestMap.Remove(res.RequestID)
 
 }
 
