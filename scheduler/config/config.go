@@ -5,7 +5,7 @@ import "time"
 const (
 	MaxNodeNum = 10
 
-	ReleaseResourcesTimeout = 65 * time.Second
+	ReleaseResourcesTimeout = 20 * time.Second
 
 	MaxBaseTimeRatio = 2
 
