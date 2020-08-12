@@ -3,13 +3,13 @@ package config
 import "time"
 
 const (
-	MaxNodeNum = 10
+	MaxNodeNum = 20
 
-	ReleaseResourcesTimeout = 10 * time.Second
+	ReleaseResourcesTimeout = 60 * time.Second
 
 	MaxBaseTimeRatio = 1.2
 
-	FirstWaitChannelTimeout = 10 * time.Millisecond
+	FirstWaitChannelTimeout = 1 * time.Millisecond
 	LastWaitChannelTimeout  = 40 * time.Second
 
 	Timout = 30 * time.Second
