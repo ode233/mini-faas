@@ -7,7 +7,7 @@ const (
 
 	ReleaseResourcesTimeout = 10 * time.Second
 
-	MaxBaseTimeRatio = 1.5
+	MaxBaseTimeRatio = 1.2
 
 	FirstWaitChannelTimeout = 10 * time.Millisecond
 	LastWaitChannelTimeout  = 40 * time.Second

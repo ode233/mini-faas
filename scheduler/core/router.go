@@ -47,7 +47,6 @@ type ContainerInfo struct {
 }
 
 type LockMap struct {
-	sync.RWMutex
 	internal icmap.ConcurrentMap
 	num      int32
 }
@@ -327,8 +326,6 @@ func (r *Router) processReturnContainer(res *model.ResponseInfo) {
 	requestStatus := rmObj.(*RequestStatus)
 	r.requestMap.Remove(res.RequestID)
 
-	// 更新本次调用相关信息
-
 	functionStatus := requestStatus.functionStatus
 	container := requestStatus.containerInfo
 
@@ -340,7 +337,7 @@ func (r *Router) processReturnContainer(res *model.ResponseInfo) {
 
 	r.sendContainer(functionStatus, functionStatus.computeRequireMemory)
 
-	r.tryReleaseResources(res, functionStatus, container)
+	//r.tryReleaseResources(res, functionStatus, container)
 
 }
 
