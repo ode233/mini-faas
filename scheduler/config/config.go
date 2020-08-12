@@ -3,10 +3,9 @@ package config
 import "time"
 
 const (
-	MaxNodeNum = 20
+	MaxNodeNum = 10
 
-	ReleaseResourcesTimeout    = 1 * time.Second
-	ReleaseResourcesTimeoutNum = 10
+	ReleaseResourcesTimeout = 10 * time.Second
 
 	MaxBaseTimeRatio = 1.5
 

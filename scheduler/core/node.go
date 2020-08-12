@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
+	"sync"
 )
 
 type NodeInfo struct {
+	sync.Mutex
+
 	nodeID              string
 	nodeNo              int
 	address             string
