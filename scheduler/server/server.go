@@ -25,7 +25,6 @@ func NewServer(router *core.Router) *Server {
 
 func (s *Server) Start() {
 	// Just in case the router has internal loops.
-	s.router.Start()
 }
 
 func (s *Server) AcquireContainer(ctx context.Context, req *pb.AcquireContainerRequest) (*pb.AcquireContainerReply, error) {

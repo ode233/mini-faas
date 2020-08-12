@@ -3,10 +3,8 @@ package core
 import (
 	"aliyun/serverless/mini-faas/scheduler/model"
 	"aliyun/serverless/mini-faas/scheduler/utils/icmap"
-	"aliyun/serverless/mini-faas/scheduler/utils/logger"
 	"context"
 	uuid "github.com/satori/go.uuid"
-	"sort"
 	"sync/atomic"
 	"time"
 
@@ -34,13 +32,14 @@ type FunctionStatus struct {
 	baseExecutionTime     int64
 	tryDecreaseMemory     bool
 	sendContainerChan     chan *SendContainerStruct
-	nodeContainerMap      cmap.ConcurrentMap // nodeNo -> ContainerMap
+	containerMap          cmap.ConcurrentMap // nodeNo -> ContainerMap
 }
 
 type ContainerInfo struct {
 	containerId         string // container_id
 	nodeInfo            *NodeInfo
 	availableMemInBytes int64
+	waitRelease         bool
 }
 
 type LockMap struct {
@@ -73,17 +72,6 @@ func NewRouter(config *cp.Config, rmClient rmPb.ResourceManagerClient) *Router {
 // 给结构体类型的引用添加方法，相当于添加实例方法，直接给结构体添加方法相当于静态方法
 func (r *Router) Start() {
 	// Just in case the router has internal loops.
-
-	go func() {
-		logger.Infof("ReserveNode in advance begin ")
-		for {
-			r.reserveNode(0)
-			if r.nodeMap.Count() >= cp.MaxNodeNum || r.requestMap.Count() > 0 {
-				logger.Infof("ReserveNode in advance finish")
-				break
-			}
-		}
-	}()
 }
 
 func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerRequest) (*pb.AcquireContainerReply, error) {
@@ -97,57 +85,46 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		computeRequireMemory: req.FunctionConfig.MemoryInBytes,
 		sendContainerChan:    make(chan *SendContainerStruct, 300),
 		tryDecreaseMemory:    true,
-		nodeContainerMap:     cmap.New(),
+		containerMap:         cmap.New(),
 	})
 
 	fmObj, _ := r.functionMap.Get(req.FunctionName)
 	functionStatus := fmObj.(*FunctionStatus)
 
 	var err error
+	var sendContainerStruct *SendContainerStruct
 	computeRequireMemory := functionStatus.computeRequireMemory
 
-	// 还没有函数返回时的调用
-	if functionStatus.maxMemoryUsageInBytes == 0 {
-		res, err = r.createNewContainer(req, functionStatus, computeRequireMemory)
+	select {
+	case sendContainerStruct = <-functionStatus.sendContainerChan:
+		res = sendContainerStruct.container
+		computeRequireMemory = sendContainerStruct.computeRequireMemory
+	default:
+		res = r.getAvailableContainer(functionStatus, computeRequireMemory)
 		if res == nil {
-			sendContainerStruct := r.waitContainer(functionStatus, cp.LastWaitChannelTimeout)
-			if sendContainerStruct != nil {
-				res = sendContainerStruct.container
-				computeRequireMemory = sendContainerStruct.computeRequireMemory
-			}
-		}
-	} else { // 有函数返回时的调用
-		sendContainerStruct := r.waitContainer(functionStatus, cp.FirstWaitChannelTimeout)
-		if sendContainerStruct != nil {
-			res = sendContainerStruct.container
-			computeRequireMemory = sendContainerStruct.computeRequireMemory
-		} else {
-			res = r.getAvailableContainer(functionStatus, computeRequireMemory)
-			if res == nil {
-				res, err = r.createNewContainer(req, functionStatus, computeRequireMemory)
-				if res == nil {
-					sendContainerStruct := r.waitContainer(functionStatus, cp.LastWaitChannelTimeout)
-					if sendContainerStruct != nil {
-						res = sendContainerStruct.container
-						computeRequireMemory = sendContainerStruct.computeRequireMemory
-					}
+			res, err = r.createNewContainer(req, functionStatus, computeRequireMemory)
+			if err != nil {
+				timeout := time.NewTimer(cp.LastWaitChannelTimeout)
+				select {
+				case sendContainerStruct := <-functionStatus.sendContainerChan:
+					res = sendContainerStruct.container
+					computeRequireMemory = sendContainerStruct.computeRequireMemory
+				case <-timeout.C:
+					return nil, err
 				}
 			}
 		}
 	}
 
-	if res == nil {
-		return nil, err
-	}
+	go func() {
+		requestStatus := &RequestStatus{
+			actualRequireMemory: computeRequireMemory,
 
-	requestStatus := &RequestStatus{
-		actualRequireMemory: computeRequireMemory,
-
-		functionStatus: functionStatus,
-		containerInfo:  res,
-	}
-
-	r.requestMap.Set(req.RequestId, requestStatus)
+			functionStatus: functionStatus,
+			containerInfo:  res,
+		}
+		r.requestMap.Set(req.RequestId, requestStatus)
+	}()
 
 	return &pb.AcquireContainerReply{
 		NodeId:          res.nodeInfo.nodeID,
@@ -157,19 +134,9 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 	}, nil
 }
 
-func (r *Router) waitContainer(functionStatus *FunctionStatus, timeoutDuration time.Duration) *SendContainerStruct {
-	timeout := time.NewTimer(timeoutDuration)
-	select {
-	case sendContainerStruct := <-functionStatus.sendContainerChan:
-		return sendContainerStruct
-	case <-timeout.C:
-		return nil
-	}
-}
-
 func (r *Router) getAvailableContainer(functionStatus *FunctionStatus, computeRequireMemory int64) *ContainerInfo {
-	for _, i := range sortedKeys(functionStatus.nodeContainerMap.Keys()) {
-		containerObj, ok := functionStatus.nodeContainerMap.Get(i)
+	for _, i := range functionStatus.containerMap.Keys() {
+		containerObj, ok := functionStatus.containerMap.Get(i)
 		if ok {
 			container := containerObj.(*ContainerInfo)
 			if atomic.LoadInt64(&(container.availableMemInBytes)) >= computeRequireMemory {
@@ -214,7 +181,7 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 				availableMemInBytes: req.FunctionConfig.MemoryInBytes - actualRequireMemory,
 			}
 			// 新键的容器还没添加进containerMap所以不用锁
-			functionStatus.nodeContainerMap.Set(replyC.ContainerId, res)
+			functionStatus.containerMap.Set(replyC.ContainerId, res)
 		}
 	}
 	return res, createContainerErr
@@ -263,7 +230,6 @@ func (r *Router) reserveNode(containerNeedMemory int64) (*NodeInfo, error) {
 	// 新建节点不需要锁
 	node.availableMemInBytes -= containerNeedMemory
 	r.nodeMap.Set(node.nodeID, node)
-	logger.Infof("ReserveNode")
 
 	return node, nil
 }
@@ -293,7 +259,6 @@ func (r *Router) ReturnContainer(ctx context.Context, res *model.ResponseInfo) e
 func (r *Router) processReturnContainer(res *model.ResponseInfo) {
 	rmObj, ok := r.requestMap.Get(res.RequestID)
 	if !ok {
-		logger.Errorf("can not find RequestID in requestMap")
 		return
 	}
 	requestStatus := rmObj.(*RequestStatus)
@@ -302,29 +267,16 @@ func (r *Router) processReturnContainer(res *model.ResponseInfo) {
 	functionStatus := requestStatus.functionStatus
 	container := requestStatus.containerInfo
 
-	r.computeRequireMemory(functionStatus, res, requestStatus)
-
-	atomic.AddInt64(&(container.availableMemInBytes), requestStatus.actualRequireMemory)
-
-	r.sendContainer(functionStatus, functionStatus.computeRequireMemory)
-
-	r.tryReleaseResources(res, functionStatus, container)
-
-}
-
-//computeRequireMemory 计算所需内存并更新相关数据
-func (r *Router) computeRequireMemory(functionStatus *FunctionStatus, res *model.ResponseInfo, requestStatus *RequestStatus) {
+	//computeRequireMemory 计算所需内存并更新相关数据
 	if res.MaxMemoryUsageInBytes > functionStatus.maxMemoryUsageInBytes {
 		functionStatus.maxMemoryUsageInBytes = res.MaxMemoryUsageInBytes
 		if functionStatus.computeRequireMemory < res.MaxMemoryUsageInBytes {
 			functionStatus.computeRequireMemory = res.MaxMemoryUsageInBytes
 		}
 	}
-
 	if functionStatus.baseExecutionTime == 0 {
 		functionStatus.baseExecutionTime = res.DurationInNanos
 	}
-
 	nowComputeRequireMemory := functionStatus.computeRequireMemory
 	if requestStatus.actualRequireMemory == nowComputeRequireMemory {
 		// 先考虑增加内存
@@ -350,44 +302,36 @@ func (r *Router) computeRequireMemory(functionStatus *FunctionStatus, res *model
 			}
 		}
 	}
-}
 
-func (r *Router) sendContainer(functionStatus *FunctionStatus, computeRequireMemory int64) {
-	container := r.getAvailableContainer(functionStatus, computeRequireMemory)
-	if container != nil {
+	// sendContainer
+	atomic.AddInt64(&(container.availableMemInBytes), requestStatus.actualRequireMemory)
+	sendContainer := r.getAvailableContainer(functionStatus, functionStatus.computeRequireMemory)
+	if sendContainer != nil {
 		functionStatus.sendContainerChan <- &SendContainerStruct{
-			container:            container,
-			computeRequireMemory: computeRequireMemory,
+			container:            sendContainer,
+			computeRequireMemory: functionStatus.computeRequireMemory,
 		}
 	}
-}
 
-func (r *Router) tryReleaseResources(res *model.ResponseInfo, functionStatus *FunctionStatus, container *ContainerInfo) {
-
+	// tryReleaseResources
 	// release container
-	if container.availableMemInBytes == functionStatus.containerTotalMemory {
-		//logger.Infof("first check %s", container.containerId)
+	if container.availableMemInBytes == functionStatus.containerTotalMemory && !container.waitRelease {
+		container.waitRelease = true
 		time.Sleep(cp.ReleaseResourcesTimeout)
-	} else {
-		return
+		if atomic.LoadInt64(&(container.availableMemInBytes)) == functionStatus.containerTotalMemory {
+			atomic.StoreInt64(&(container.availableMemInBytes), 0)
+
+			node := container.nodeInfo
+			functionStatus.containerMap.Remove(container.containerId)
+			atomic.AddInt64(&(node.availableMemInBytes), functionStatus.containerTotalMemory)
+
+			go node.RemoveContainer(context.Background(), &nsPb.RemoveContainerRequest{
+				RequestId:   res.RequestID,
+				ContainerId: container.containerId,
+			})
+		} else {
+			container.waitRelease = false
+		}
 	}
 
-	if atomic.LoadInt64(&(container.availableMemInBytes)) == functionStatus.containerTotalMemory {
-		atomic.StoreInt64(&(container.availableMemInBytes), 0)
-
-		node := container.nodeInfo
-		functionStatus.nodeContainerMap.Remove(container.containerId)
-		atomic.AddInt64(&(node.availableMemInBytes), functionStatus.containerTotalMemory)
-
-		go node.RemoveContainer(context.Background(), &nsPb.RemoveContainerRequest{
-			RequestId:   res.RequestID,
-			ContainerId: container.containerId,
-		})
-	}
-
-}
-
-func sortedKeys(keys []string) []string {
-	sort.Strings(keys)
-	return keys
 }
