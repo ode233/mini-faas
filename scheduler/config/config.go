@@ -5,9 +5,9 @@ import "time"
 const (
 	MaxNodeNum = 10
 
-	ReleaseResourcesTimeout = 30 * time.Second
+	ReleaseResourcesTimeout = 65 * time.Second
 
-	MaxBaseTimeRatio = 1.2
+	MaxBaseTimeRatio = 2
 
 	LastWaitChannelTimeout = 40 * time.Second
 

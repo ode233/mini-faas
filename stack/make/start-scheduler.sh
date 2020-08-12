@@ -14,7 +14,7 @@ fi
 
 if [ "$BUILD" == "true" ]; then
 #  docker run -v $(pwd):/mini-faas golang:1.12.9 bash -c "cd /mini-faas/scheduler; export GOPROXY=https://goproxy.io; go build -o scheduler ./main.go"
-  docker run -v /$(pwd):/mini-faas golang:1.12.9 bash -c "cd /mini-faas/scheduler; export GOPROXY=https://goproxy.io; go build -o scheduler ./main.go"
+  docker run -v /$(pwd):/mini-faas golang:1.15.0 bash -c "cd /mini-faas/scheduler; export GOPROXY=https://goproxy.io; go build -o scheduler ./main.go"
   cd scheduler
   chmod +x scheduler
   docker build -t $SCHEDULER_IMAGE .
