@@ -5,6 +5,7 @@ import (
 	"aliyun/serverless/mini-faas/scheduler/utils/icmap"
 	"context"
 	uuid "github.com/satori/go.uuid"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -32,7 +33,7 @@ type FunctionStatus struct {
 	baseExecutionTime     int64
 	tryDecreaseMemory     bool
 	sendContainerChan     chan *SendContainerStruct
-	containerMap          cmap.ConcurrentMap // nodeNo -> ContainerMap
+	containerMap          *LockMap // nodeNo -> ContainerMap
 }
 
 type ContainerInfo struct {
@@ -40,6 +41,7 @@ type ContainerInfo struct {
 	nodeInfo            *NodeInfo
 	availableMemInBytes int64
 	waitRelease         bool
+	containerNo         int
 }
 
 type LockMap struct {
@@ -85,7 +87,9 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 		computeRequireMemory: req.FunctionConfig.MemoryInBytes,
 		sendContainerChan:    make(chan *SendContainerStruct, 300),
 		tryDecreaseMemory:    true,
-		containerMap:         cmap.New(),
+		containerMap: &LockMap{
+			internal: icmap.New(),
+		},
 	})
 
 	fmObj, _ := r.functionMap.Get(req.FunctionName)
@@ -135,8 +139,8 @@ func (r *Router) AcquireContainer(ctx context.Context, req *pb.AcquireContainerR
 }
 
 func (r *Router) getAvailableContainer(functionStatus *FunctionStatus, computeRequireMemory int64) *ContainerInfo {
-	for _, i := range functionStatus.containerMap.Keys() {
-		containerObj, ok := functionStatus.containerMap.Get(i)
+	for _, i := range sortedKeys(functionStatus.containerMap.internal.Keys()) {
+		containerObj, ok := functionStatus.containerMap.internal.Get(i)
 		if ok {
 			container := containerObj.(*ContainerInfo)
 			if atomic.LoadInt64(&(container.availableMemInBytes)) >= computeRequireMemory {
@@ -175,13 +179,15 @@ func (r *Router) createNewContainer(req *pb.AcquireContainerRequest, functionSta
 			atomic.AddInt64(&(node.availableMemInBytes), req.FunctionConfig.MemoryInBytes)
 			createContainerErr = errors.Wrapf(err, "failed to create container")
 		} else {
+			containerNo := int(atomic.AddInt32(&(functionStatus.containerMap.num), 1))
 			res = &ContainerInfo{
 				containerId:         replyC.ContainerId,
 				nodeInfo:            node,
 				availableMemInBytes: req.FunctionConfig.MemoryInBytes - actualRequireMemory,
+				containerNo:         containerNo,
 			}
 			// 新键的容器还没添加进containerMap所以不用锁
-			functionStatus.containerMap.Set(replyC.ContainerId, res)
+			functionStatus.containerMap.internal.Set(containerNo, res)
 		}
 	}
 	return res, createContainerErr
@@ -322,7 +328,7 @@ func (r *Router) processReturnContainer(res *model.ResponseInfo) {
 			atomic.StoreInt64(&(container.availableMemInBytes), 0)
 
 			node := container.nodeInfo
-			functionStatus.containerMap.Remove(container.containerId)
+			functionStatus.containerMap.internal.Remove(container.containerNo)
 			atomic.AddInt64(&(node.availableMemInBytes), functionStatus.containerTotalMemory)
 
 			go node.RemoveContainer(context.Background(), &nsPb.RemoveContainerRequest{
@@ -334,4 +340,9 @@ func (r *Router) processReturnContainer(res *model.ResponseInfo) {
 		}
 	}
 
+}
+
+func sortedKeys(keys []int) []int {
+	sort.Ints(keys)
+	return keys
 }
